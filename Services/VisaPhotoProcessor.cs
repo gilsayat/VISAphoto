@@ -194,70 +194,69 @@ namespace USVisaPhotoAutomator.Services
         }
 
         private Image<L8> GetPortraitAlphaMask(Image<Rgb24> sourceImage)
+{
+    const int dim = 320;
+    using var resized = sourceImage.Clone(x => x.Resize(new ResizeOptions
+    {
+        Size = new Size(dim, dim),
+        Sampler = KnownResamplers.Lanczos3
+    }));
+
+    var tensor = new DenseTensor<float>(new[] { 1, 3, dim, dim });
+    resized.ProcessPixelRows(accessor =>
+    {
+        for (int y = 0; y < dim; y++)
         {
-            const int dim = 512;
-            using var resized = sourceImage.Clone(x => x.Resize(new ResizeOptions
+            var row = accessor.GetRowSpan(y);
+            for (int x = 0; x < dim; x++)
             {
-                Size = new Size(dim, dim),
-                Sampler = KnownResamplers.Lanczos3
-            }));
-
-            var tensor = new DenseTensor<float>(new[] { 1, 3, dim, dim });
-            resized.ProcessPixelRows(accessor =>
-            {
-                for (int y = 0; y < dim; y++)
-                {
-                    var row = accessor.GetRowSpan(y);
-                    for (int x = 0; x < dim; x++)
-                    {
-                        tensor[0, 0, y, x] = (row[x].R / 255f - 0.485f) / 0.229f;
-                        tensor[0, 1, y, x] = (row[x].G / 255f - 0.456f) / 0.224f;
-                        tensor[0, 2, y, x] = (row[x].B / 255f - 0.406f) / 0.225f;
-                    }
-                }
-            });
-
-            var session = GetOrCreateSession();
-            string inputName = session.InputMetadata.Keys.FirstOrDefault() ?? "input.1";
-            var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(inputName, tensor) };
-
-            using var results = session.Run(inputs);
-            var outTensor = results.First().AsTensor<float>();
-
-            float min = float.MaxValue, max = float.MinValue;
-            foreach (float val in outTensor)
-            {
-                if (val < min) min = val;
-                if (val > max) max = val;
+                tensor[0, 0, y, x] = (row[x].R / 255f - 0.485f) / 0.229f;
+                tensor[0, 1, y, x] = (row[x].G / 255f - 0.456f) / 0.224f;
+                tensor[0, 2, y, x] = (row[x].B / 255f - 0.406f) / 0.225f;
             }
-            float range = max - min;
-
-            using var smallMask = new Image<L8>(dim, dim);
-            smallMask.ProcessPixelRows(accessor =>
-            {
-                for (int y = 0; y < dim; y++)
-                {
-                    var row = accessor.GetRowSpan(y);
-                    for (int x = 0; x < dim; x++)
-                    {
-                        float val = outTensor[0, 0, y, x];
-                        float norm = range > 1e-6f ? Math.Clamp((val - min) / range, 0f, 1f) : 0f;
-                        // Clean up faint background haze while keeping soft hair edges
-                        if (norm < 0.08f) norm = 0f;
-                        else if (norm > 0.92f) norm = 1f;
-                        row[x] = new L8((byte)Math.Round(norm * 255f));
-                    }
-                }
-            });
-
-            var fullResMask = smallMask.Clone(x => x.Resize(new ResizeOptions
-            {
-                Size = new Size(sourceImage.Width, sourceImage.Height),
-                Sampler = KnownResamplers.Lanczos3
-            }));
-
-            return fullResMask;
         }
+    });
+
+    var session = GetOrCreateSession();
+    string inputName = session.InputMetadata.Keys.FirstOrDefault() ?? "input.1";
+    var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(inputName, tensor) };
+
+    using var results = session.Run(inputs);
+    var outTensor = results.First().AsTensor<float>();
+
+    float min = float.MaxValue, max = float.MinValue;
+    foreach (float val in outTensor)
+    {
+        if (val < min) min = val;
+        if (val > max) max = val;
+    }
+    float range = max - min;
+
+    using var smallMask = new Image<L8>(dim, dim);
+    smallMask.ProcessPixelRows(accessor =>
+    {
+        for (int y = 0; y < dim; y++)
+        {
+            var row = accessor.GetRowSpan(y);
+            for (int x = 0; x < dim; x++)
+            {
+                float val = outTensor[0, 0, y, x];
+                float norm = range > 1e-6f ? Math.Clamp((val - min) / range, 0f, 1f) : 0f;
+                if (norm < 0.08f) norm = 0f;
+                else if (norm > 0.92f) norm = 1f;
+                row[x] = new L8((byte)Math.Round(norm * 255f));
+            }
+        }
+    });
+
+    var fullResMask = smallMask.Clone(x => x.Resize(new ResizeOptions
+    {
+        Size = new Size(sourceImage.Width, sourceImage.Height),
+        Sampler = KnownResamplers.Lanczos3
+    }));
+
+    return fullResMask;
+}
 
         private static void ApplyPureWhiteBackground(Image<Rgb24> image, Image<L8> mask)
         {
