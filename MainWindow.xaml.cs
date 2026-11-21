@@ -54,18 +54,18 @@ namespace USVisaPhotoAutomator
             DropBorder.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#3F3F46"));
         }
 
-        private async void DropZone_Drop(object sender, DragEventArgs e)
+        private void DropZone_Drop(object sender, DragEventArgs e)
         {
             DropBorder.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#3F3F46"));
             if (e.Data.GetDataPresent(DataFormats.FileDrop))
             {
                 string[]? files = e.Data.GetData(DataFormats.FileDrop) as string[];
                 string? file = files?.FirstOrDefault();
-                await HandleImageSelectionAsync(file);
+                HandleImageSelection(file);
             }
         }
 
-        private async void BtnBrowse_Click(object sender, RoutedEventArgs e)
+        private void BtnBrowse_Click(object sender, RoutedEventArgs e)
         {
             OpenFileDialog openFileDialog = new OpenFileDialog
             {
@@ -75,19 +75,11 @@ namespace USVisaPhotoAutomator
 
             if (openFileDialog.ShowDialog() == true)
             {
-                await HandleImageSelectionAsync(openFileDialog.FileName);
+                HandleImageSelection(openFileDialog.FileName);
             }
         }
 
-        private async void Settings_Changed(object sender, RoutedEventArgs e)
-        {
-            if (!IsLoaded || _isProcessing || string.IsNullOrEmpty(_lastInputPath) || !File.Exists(_lastInputPath))
-                return;
-
-            await ProcessFileAsync(_lastInputPath);
-        }
-
-        private async Task HandleImageSelectionAsync(string? filePath)
+        private void HandleImageSelection(string? filePath)
         {
             if (string.IsNullOrEmpty(filePath) || !IsImageFile(filePath))
             {
@@ -96,7 +88,33 @@ namespace USVisaPhotoAutomator
             }
 
             _lastInputPath = filePath;
-            await ProcessFileAsync(filePath);
+            _lastOutputPath = null; // Reset previous output state
+
+            ShowPreview(filePath);
+            BtnGenerate.IsEnabled = true;
+            BtnOpenFolder.Visibility = Visibility.Collapsed;
+            UpdateStatus("Photo loaded. Ready to generate.", "#00FF7F");
+        }
+
+        private async void BtnGenerate_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrEmpty(_lastInputPath) || !File.Exists(_lastInputPath)) return;
+            
+            BtnGenerate.IsEnabled = false;
+            await ProcessFileAsync(_lastInputPath);
+            BtnGenerate.IsEnabled = true;
+        }
+
+        private async void Settings_Changed(object sender, RoutedEventArgs e)
+        {
+            // Only auto-reprocess if an output was ALREADY generated (so you can tweak settings live)
+            if (!IsLoaded || _isProcessing || string.IsNullOrEmpty(_lastOutputPath)) return;
+            if (!string.IsNullOrEmpty(_lastInputPath) && File.Exists(_lastInputPath))
+            {
+                BtnGenerate.IsEnabled = false;
+                await ProcessFileAsync(_lastInputPath);
+                BtnGenerate.IsEnabled = true;
+            }
         }
 
         private bool IsImageFile(string path)
@@ -125,10 +143,8 @@ namespace USVisaPhotoAutomator
             try
             {
                 UpdateStatus("Processing AI Image...", "#FFD700");
-                PlaceholderUI.Visibility = Visibility.Collapsed;
-                PreviewImage.Visibility = Visibility.Collapsed;
-                BtnOpenFolder.Visibility = Visibility.Collapsed;
                 ProcessingProgress.Visibility = Visibility.Visible;
+                BtnOpenFolder.Visibility = Visibility.Collapsed;
 
                 string format = (CmbFormat.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "JPG";
                 bool isPrintMode = ChkPrintMode.IsChecked == true;
@@ -139,10 +155,10 @@ namespace USVisaPhotoAutomator
                 string outputFilename = $"{Path.GetFileNameWithoutExtension(inputPath)}_VisaCompliant.{ext}";
                 string outputDir = Path.GetDirectoryName(inputPath) ?? AppDomain.CurrentDomain.BaseDirectory;
                 string outputPath = Path.Combine(outputDir, outputFilename);
-                _lastOutputPath = outputPath;
 
                 await Task.Run(() => _processor.ProcessVisaPhoto(inputPath, outputPath, format, isPrintMode, edgeMode, fixLighting));
 
+                _lastOutputPath = outputPath;
                 ShowPreview(outputPath);
                 UpdateStatus($"Compliant & Saved ({edgeMode})!", "#00FF7F");
                 BtnOpenFolder.Visibility = Visibility.Visible;
@@ -150,7 +166,6 @@ namespace USVisaPhotoAutomator
             catch (Exception ex)
             {
                 UpdateStatus($"Error: {ex.Message}", "#FF5C5C");
-                PlaceholderUI.Visibility = Visibility.Visible;
             }
             finally
             {
@@ -167,6 +182,8 @@ namespace USVisaPhotoAutomator
             bitmap.CreateOptions = BitmapCreateOptions.IgnoreImageCache;
             bitmap.UriSource = new Uri(path);
             bitmap.EndInit();
+            
+            PlaceholderUI.Visibility = Visibility.Collapsed;
             PreviewImage.Source = bitmap;
             PreviewImage.Visibility = Visibility.Visible;
         }
