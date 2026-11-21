@@ -15,8 +15,12 @@ namespace USVisaPhotoAutomator.Services
     {
         private readonly string _onnxModelPath;
         private readonly string _dlibModelPath;
-        private readonly object _sessionLock = new object();
+        
+        private readonly object _modelLock = new object();
         private InferenceSession? _session;
+        private FrontalFaceDetector? _detector;
+        private ShapePredictor? _predictor;
+        private bool _isDisposed;
 
         public VisaPhotoProcessor(string modelsDirectory)
         {
@@ -24,38 +28,50 @@ namespace USVisaPhotoAutomator.Services
             _dlibModelPath = Path.Combine(modelsDirectory, "shape_predictor_68_face_landmarks.dat");
         }
 
-        private InferenceSession GetOrCreateSession()
+        public void PreWarmModels()
         {
-            if (_session != null) return _session;
-            lock (_sessionLock)
-            {
-                if (_session != null) return _session;
-                if (!File.Exists(_onnxModelPath))
-                    throw new FileNotFoundException("u2net.onnx model is missing in the Models folder.");
+            EnsureModelsLoaded();
+        }
 
-                var opts = new SessionOptions
+        private void EnsureModelsLoaded()
+        {
+            if (_isDisposed) throw new ObjectDisposedException(nameof(VisaPhotoProcessor));
+            
+            if (_session != null && _detector != null && _predictor != null) 
+                return;
+
+            lock (_modelLock)
+            {
+                if (_session != null && _detector != null && _predictor != null) 
+                    return;
+
+                if (!File.Exists(_onnxModelPath))
+                    throw new FileNotFoundException("Model Missing: 'u2net.onnx' not found in Models folder.");
+                if (!File.Exists(_dlibModelPath))
+                    throw new FileNotFoundException("Model Missing: 'shape_predictor_68_face_landmarks.dat' not found.");
+
+                if (_session == null)
                 {
-                    GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
-                    ExecutionMode = ExecutionMode.ORT_SEQUENTIAL
-                };
-                _session = new InferenceSession(_onnxModelPath, opts);
-                return _session;
+                    var opts = new SessionOptions
+                    {
+                        GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+                        ExecutionMode = ExecutionMode.ORT_SEQUENTIAL
+                    };
+                    _session = new InferenceSession(_onnxModelPath, opts);
+                }
+
+                _detector ??= Dlib.GetFrontalFaceDetector();
+                _predictor ??= ShapePredictor.Deserialize(_dlibModelPath);
             }
         }
 
         public void ProcessVisaPhoto(string inputPath, string outputPath, string format, bool isPrintMode)
         {
-            if (!File.Exists(_onnxModelPath))
-                throw new FileNotFoundException("u2net.onnx model is missing in the Models folder.");
-            if (!File.Exists(_dlibModelPath))
-                throw new FileNotFoundException("shape_predictor_68_face_landmarks.dat is missing.");
+            EnsureModelsLoaded();
 
-            // U.S. Department of State digital square size: 600x600 min to 1200x1200 max pixels.
             int targetSize = isPrintMode ? 1200 : 600;
             float dpi = isPrintMode ? 600f : 300f;
 
-            // Head height (top of head/hair to chin): 50% - 69% of image height (target 60%).
-            // Eye height from bottom of photo to eye line: 56% - 69% of image height (target 62.5%).
             const float targetHeadRatio = 0.60f;
             const float targetEyeRatioFromBottom = 0.625f;
 
@@ -63,14 +79,13 @@ namespace USVisaPhotoAutomator.Services
             if (originalImage.Width < 200 || originalImage.Height < 200)
                 throw new Exception("Source image resolution is too low for a crisp visa photo.");
 
-            // Cap working resolution at 1600px on longest side for reliable detection & speed
             using Bitmap workingImage = ResizeIfLarger(originalImage, 1600);
 
-            // 1. Background matting & pure white (#FFFFFF) replacement
+            // 1. Matting
             using Bitmap alphaMask = GetPortraitAlphaMask(workingImage);
             using Bitmap whiteBgImage = ApplyPureWhiteBackground(workingImage, alphaMask);
 
-            // 2. Detect facial landmarks on the upright, white-background portrait
+            // 2. Detection (with Smart Multi-Scale Fallback)
             string tempFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".bmp");
             whiteBgImage.Save(tempFile, ImageFormat.Bmp);
 
@@ -78,18 +93,22 @@ namespace USVisaPhotoAutomator.Services
 
             try
             {
-                using var detector = Dlib.GetFrontalFaceDetector();
-                using var predictor = ShapePredictor.Deserialize(_dlibModelPath);
                 using var dlibImg = Dlib.LoadImage<RgbPixel>(tempFile);
 
-                var faces = detector.Operator(dlibImg, 1);
+                // Smart Fallback: Try native scale first (best for large/close faces)
+                var faces = _detector!.Operator(dlibImg, 0);
+                
+                // If it misses, upsample the image to catch smaller/farther faces
                 if (faces.Length == 0)
-                    throw new Exception("No face detected in the image. Ensure the face is forward-facing and upright.");
+                    faces = _detector.Operator(dlibImg, 1);
+
+                if (faces.Length == 0)
+                    throw new Exception("No face detected. Ensure lighting is even and the subject is looking forward.");
                 if (faces.Length > 1)
-                    throw new Exception("Multiple faces detected. Visa photos must contain only one person.");
+                    throw new Exception($"Multiple faces detected ({faces.Length}). Visa photos must contain exactly 1 person.");
 
                 var face = faces.OrderByDescending(r => r.Width * r.Height).First();
-                using var shape = predictor.Detect(dlibImg, face);
+                using var shape = _predictor!.Detect(dlibImg, face);
 
                 int boxHeight = Math.Max(1, (int)face.Height);
                 int estimatedCrown = Math.Max(0, (int)face.Top - (int)(boxHeight * 0.14f));
@@ -104,18 +123,17 @@ namespace USVisaPhotoAutomator.Services
             }
             finally
             {
-                if (File.Exists(tempFile))
-                    File.Delete(tempFile);
+                if (File.Exists(tempFile)) File.Delete(tempFile);
             }
 
             int currentHeadHeight = chinBottom - headTop;
             if (currentHeadHeight <= 0)
-                throw new Exception("Could not measure valid head height.");
+                throw new Exception("Could not measure valid head height from facial landmarks.");
 
-            // 3. Scale so head height is ~60% of targetSize (inside 50% - 69%)
+            // 3. Math & Crop
             float scale = (targetSize * targetHeadRatio) / currentHeadHeight;
             if (scale > 4.0f)
-                throw new Exception("Face in source photo is too small for high-quality visa output.");
+                throw new Exception("Face is too small/far away to yield a high-quality 2x2\" visa photo.");
 
             int scaledEyeLineY = (int)(eyeLineY * scale);
             int scaledFaceCenterX = (int)(faceCenterX * scale);
@@ -134,33 +152,28 @@ namespace USVisaPhotoAutomator.Services
 
             using (Graphics g = Graphics.FromImage(finalImage))
             {
-                g.Clear(System.Drawing.Color.White);
+                g.Clear(Color.White);
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.SmoothingMode = SmoothingMode.HighQuality;
                 g.CompositingQuality = CompositingQuality.HighQuality;
-
                 g.DrawImage(whiteBgImage, offsetX, offsetY, scaledWidth, scaledHeight);
             }
 
-            // 4. Export format & size rules
+            // 4. Export
             if (string.Equals(format, "PNG", StringComparison.OrdinalIgnoreCase))
-            {
                 finalImage.Save(outputPath, ImageFormat.Png);
-            }
             else if (isPrintMode)
-            {
                 SaveJpegWithQuality(finalImage, outputPath, 98);
-            }
             else
-            {
                 SaveUnder240KbJpeg(finalImage, outputPath);
-            }
         }
 
         private static Bitmap LoadOrientedBitmap(string inputPath)
         {
-            using var rawImg = System.Drawing.Image.FromFile(inputPath);
+            // Use FileStream to prevent Windows from locking the file
+            using var fs = new FileStream(inputPath, FileMode.Open, FileAccess.Read);
+            using var rawImg = Image.FromStream(fs, useEmbeddedColorManagement: false, validateImageData: false);
             var bmp = new Bitmap(rawImg);
 
             const int orientationTagId = 0x0112;
@@ -198,8 +211,6 @@ namespace USVisaPhotoAutomator.Services
             var resized = new Bitmap(w, h, PixelFormat.Format24bppRgb);
             using var g = Graphics.FromImage(resized);
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.SmoothingMode = SmoothingMode.HighQuality;
             g.DrawImage(source, 0, 0, w, h);
             return resized;
         }
@@ -211,7 +222,6 @@ namespace USVisaPhotoAutomator.Services
             using (var g = Graphics.FromImage(resized))
             {
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.DrawImage(sourceImage, 0, 0, dim, dim);
             }
 
@@ -225,17 +235,14 @@ namespace USVisaPhotoAutomator.Services
                 {
                     byte* basePtr = (byte*)bmpData.Scan0;
                     int stride = bmpData.Stride;
-
                     for (int y = 0; y < dim; y++)
                     {
                         byte* row = basePtr + (y * stride);
                         for (int x = 0; x < dim; x++)
                         {
-                            // Format24bppRgb in System.Drawing is B, G, R in memory
                             byte b = row[x * 3];
                             byte gVal = row[x * 3 + 1];
                             byte r = row[x * 3 + 2];
-
                             tensor[0, 0, y, x] = (r / 255f - 0.485f) / 0.229f;
                             tensor[0, 1, y, x] = (gVal / 255f - 0.456f) / 0.224f;
                             tensor[0, 2, y, x] = (b / 255f - 0.406f) / 0.225f;
@@ -243,16 +250,12 @@ namespace USVisaPhotoAutomator.Services
                     }
                 }
             }
-            finally
-            {
-                resized.UnlockBits(bmpData);
-            }
+            finally { resized.UnlockBits(bmpData); }
 
-            var session = GetOrCreateSession();
-            string inputName = session.InputMetadata.Keys.FirstOrDefault() ?? "input.1";
+            string inputName = _session!.InputMetadata.Keys.FirstOrDefault() ?? "input.1";
             var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(inputName, tensor) };
 
-            using var results = session.Run(inputs);
+            using var results = _session.Run(inputs);
             var outTensor = results.First().AsTensor<float>();
 
             float min = float.MaxValue, max = float.MinValue;
@@ -264,8 +267,7 @@ namespace USVisaPhotoAutomator.Services
             float range = max - min;
 
             using var smallMask = new Bitmap(dim, dim, PixelFormat.Format24bppRgb);
-            var maskRect = new Rectangle(0, 0, dim, dim);
-            var maskData = smallMask.LockBits(maskRect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+            var maskData = smallMask.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
 
             try
             {
@@ -273,7 +275,6 @@ namespace USVisaPhotoAutomator.Services
                 {
                     byte* basePtr = (byte*)maskData.Scan0;
                     int stride = maskData.Stride;
-
                     for (int y = 0; y < dim; y++)
                     {
                         byte* row = basePtr + (y * stride);
@@ -292,15 +293,11 @@ namespace USVisaPhotoAutomator.Services
                     }
                 }
             }
-            finally
-            {
-                smallMask.UnlockBits(maskData);
-            }
+            finally { smallMask.UnlockBits(maskData); }
 
             var fullResMask = new Bitmap(sourceImage.Width, sourceImage.Height, PixelFormat.Format24bppRgb);
             using var gm = Graphics.FromImage(fullResMask);
             gm.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            gm.PixelOffsetMode = PixelOffsetMode.HighQuality;
             gm.DrawImage(smallMask, 0, 0, sourceImage.Width, sourceImage.Height);
             return fullResMask;
         }
@@ -339,14 +336,9 @@ namespace USVisaPhotoAutomator.Services
                         {
                             int idx = x * 3;
                             float alpha = mRow[idx] / 255f;
-
-                            byte b = (byte)Math.Clamp(Math.Round(sRow[idx] * alpha + 255f * (1f - alpha)), 0, 255);
-                            byte g = (byte)Math.Clamp(Math.Round(sRow[idx + 1] * alpha + 255f * (1f - alpha)), 0, 255);
-                            byte r = (byte)Math.Clamp(Math.Round(sRow[idx + 2] * alpha + 255f * (1f - alpha)), 0, 255);
-
-                            dRow[idx] = b;
-                            dRow[idx + 1] = g;
-                            dRow[idx + 2] = r;
+                            dRow[idx] = (byte)Math.Clamp(Math.Round(sRow[idx] * alpha + 255f * (1f - alpha)), 0, 255);
+                            dRow[idx + 1] = (byte)Math.Clamp(Math.Round(sRow[idx + 1] * alpha + 255f * (1f - alpha)), 0, 255);
+                            dRow[idx + 2] = (byte)Math.Clamp(Math.Round(sRow[idx + 2] * alpha + 255f * (1f - alpha)), 0, 255);
                         }
                     }
                 }
@@ -357,38 +349,23 @@ namespace USVisaPhotoAutomator.Services
                 maskCopy.UnlockBits(mskData);
                 result.UnlockBits(dstData);
             }
-
             return result;
-        }
-
-        private static ImageCodecInfo? GetJpegCodec()
-        {
-            return ImageCodecInfo.GetImageEncoders().FirstOrDefault(c => c.FormatID == ImageFormat.Jpeg.Guid);
         }
 
         private static void SaveJpegWithQuality(Bitmap image, string outputPath, int quality)
         {
-            var codec = GetJpegCodec();
-            if (codec == null)
-            {
-                image.Save(outputPath, ImageFormat.Jpeg);
-                return;
-            }
+            var codec = ImageCodecInfo.GetImageEncoders().FirstOrDefault(c => c.FormatID == ImageFormat.Jpeg.Guid);
+            if (codec == null) { image.Save(outputPath, ImageFormat.Jpeg); return; }
 
             using var encoderParams = new EncoderParameters(1);
-            encoderParams.Param[0] = new EncoderParameter(Encoder.Quality, (long)quality);
+            encoderParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)quality);
             image.Save(outputPath, codec, encoderParams);
         }
 
         private static void SaveUnder240KbJpeg(Bitmap image, string outputPath)
         {
-            const int maxBytes = 240 * 1024;
-            var codec = GetJpegCodec();
-            if (codec == null)
-            {
-                image.Save(outputPath, ImageFormat.Jpeg);
-                return;
-            }
+            var codec = ImageCodecInfo.GetImageEncoders().FirstOrDefault(c => c.FormatID == ImageFormat.Jpeg.Guid);
+            if (codec == null) { image.Save(outputPath, ImageFormat.Jpeg); return; }
 
             int quality = 92;
             byte[] bestBytes = Array.Empty<byte>();
@@ -397,24 +374,28 @@ namespace USVisaPhotoAutomator.Services
             {
                 using var ms = new MemoryStream();
                 using var encoderParams = new EncoderParameters(1);
-                encoderParams.Param[0] = new EncoderParameter(Encoder.Quality, (long)quality);
+                encoderParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)quality);
                 image.Save(ms, codec, encoderParams);
 
                 bestBytes = ms.ToArray();
-                if (bestBytes.Length <= maxBytes)
-                    break;
+                if (bestBytes.Length <= 240 * 1024) break;
                 quality -= 4;
             }
-
             File.WriteAllBytes(outputPath, bestBytes);
         }
 
         public void Dispose()
         {
-            lock (_sessionLock)
+            if (_isDisposed) return;
+            lock (_modelLock)
             {
                 _session?.Dispose();
+                _detector?.Dispose();
+                _predictor?.Dispose();
                 _session = null;
+                _detector = null;
+                _predictor = null;
+                _isDisposed = true;
             }
         }
     }
