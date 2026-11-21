@@ -99,156 +99,197 @@ namespace USVisaPhotoAutomator.Services
             if (originalImage.Width < 200 || originalImage.Height < 200)
                 throw new Exception("Source image resolution is too low for a crisp visa photo.");
 
-            using Bitmap workingImage = ResizeIfLarger(originalImage, 2200);
+            Bitmap workingImage = ResizeIfLarger(originalImage, 2200);
 
-            // 1. Detect facial landmarks directly on the natural photo first
-            string tempFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".bmp");
-            workingImage.Save(tempFile, ImageFormat.Bmp);
-
-            int faceLeft, faceRight, browLineY, chinBottomY;
-            float eyeLineY, faceCenterX;
+            // --- 1. Auto-Leveling (Head Tilt Correction) ---
+            string tiltTempFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".bmp");
+            workingImage.Save(tiltTempFile, ImageFormat.Bmp);
+            float tiltAngle = 0;
 
             try
             {
-                using var dlibImg = Dlib.LoadImage<RgbPixel>(tempFile);
-
+                using var dlibImg = Dlib.LoadImage<RgbPixel>(tiltTempFile);
                 var faces = _detector!.Operator(dlibImg, 0);
-                if (faces.Length == 0)
-                    faces = _detector.Operator(dlibImg, 1);
+                if (faces.Length == 0) faces = _detector.Operator(dlibImg, 1);
 
-                if (faces.Length == 0)
-                    throw new Exception("No face detected. Ensure lighting is even and the subject is looking forward.");
-                if (faces.Length > 1)
-                    throw new Exception($"Multiple faces detected ({faces.Length}). Visa photos must contain exactly 1 person.");
-
-                var face = faces.OrderByDescending(r => r.Width * r.Height).First();
-                using var shape = _predictor!.Detect(dlibImg, face);
-
-                faceLeft = (int)face.Left;
-                faceRight = (int)face.Right;
-                browLineY = (int)face.Top;
-                chinBottomY = Math.Max((int)shape.GetPart(8).Y,
-                              Math.Max((int)shape.GetPart(7).Y, (int)shape.GetPart(9).Y));
-
-                float leftEyeX = 0, leftEyeY = 0, rightEyeX = 0, rightEyeY = 0;
-                for (uint i = 36; i <= 41; i++)
+                if (faces.Length == 1)
                 {
-                    leftEyeX += shape.GetPart(i).X;
-                    leftEyeY += shape.GetPart(i).Y;
+                    using var shape = _predictor!.Detect(dlibImg, faces[0]);
+                    float leftEyeY = 0, leftEyeX = 0, rightEyeY = 0, rightEyeX = 0;
+                    
+                    for (uint i = 36; i <= 41; i++) { leftEyeX += shape.GetPart(i).X; leftEyeY += shape.GetPart(i).Y; }
+                    for (uint i = 42; i <= 47; i++) { rightEyeX += shape.GetPart(i).X; rightEyeY += shape.GetPart(i).Y; }
+                    
+                    leftEyeX /= 6.0f; leftEyeY /= 6.0f;
+                    rightEyeX /= 6.0f; rightEyeY /= 6.0f;
+
+                    float dx = rightEyeX - leftEyeX;
+                    float dy = rightEyeY - leftEyeY;
+                    tiltAngle = (float)(Math.Atan2(dy, dx) * (180.0 / Math.PI));
                 }
-                for (uint i = 42; i <= 47; i++)
+            }
+            finally { if (File.Exists(tiltTempFile)) File.Delete(tiltTempFile); }
+
+            Bitmap leveledImage = workingImage;
+            if (Math.Abs(tiltAngle) > 1.5f)
+            {
+                leveledImage = new Bitmap(workingImage.Width, workingImage.Height, PixelFormat.Format24bppRgb);
+                leveledImage.SetResolution(workingImage.HorizontalResolution, workingImage.VerticalResolution);
+                using (Graphics g = Graphics.FromImage(leveledImage))
                 {
-                    rightEyeX += shape.GetPart(i).X;
-                    rightEyeY += shape.GetPart(i).Y;
+                    g.Clear(System.Drawing.Color.White);
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.TranslateTransform(workingImage.Width / 2f, workingImage.Height / 2f);
+                    g.RotateTransform(tiltAngle); 
+                    g.TranslateTransform(-workingImage.Width / 2f, -workingImage.Height / 2f);
+                    g.DrawImage(workingImage, new System.Drawing.Point(0, 0));
+                }
+                workingImage.Dispose();
+            }
+
+            try
+            {
+                // --- 2. Landmark Detection & Safety Checks ---
+                string detectTempFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".bmp");
+                leveledImage.Save(detectTempFile, ImageFormat.Bmp);
+
+                int faceLeft, faceRight, browLineY, chinBottomY;
+                float eyeLineY, faceCenterX;
+
+                try
+                {
+                    using var dlibImg = Dlib.LoadImage<RgbPixel>(detectTempFile);
+                    var faces = _detector!.Operator(dlibImg, 0);
+                    if (faces.Length == 0) faces = _detector.Operator(dlibImg, 1);
+
+                    if (faces.Length == 0)
+                        throw new Exception("No face detected. Ensure lighting is even and the subject is looking forward.");
+                    if (faces.Length > 1)
+                        throw new Exception($"Multiple faces detected ({faces.Length}). Visa photos must contain exactly 1 person.");
+
+                    var face = faces.OrderByDescending(r => r.Width * r.Height).First();
+                    using var shape = _predictor!.Detect(dlibImg, face);
+
+                    // Open Mouth / Smile Check
+                    float mouthHeight = shape.GetPart(66).Y - shape.GetPart(62).Y;
+                    float mouthWidth = shape.GetPart(64).X - shape.GetPart(60).X;
+                    if (mouthWidth > 0 && (mouthHeight / mouthWidth) > 0.20f)
+                        throw new Exception("Subject's mouth appears open or smiling. US Visa rules require a strictly neutral expression.");
+
+                    faceLeft = (int)face.Left;
+                    faceRight = (int)face.Right;
+                    browLineY = (int)face.Top;
+                    chinBottomY = Math.Max((int)shape.GetPart(8).Y,
+                                  Math.Max((int)shape.GetPart(7).Y, (int)shape.GetPart(9).Y));
+
+                    float leftEyeX = 0, leftEyeY = 0, rightEyeX = 0, rightEyeY = 0;
+                    for (uint i = 36; i <= 41; i++) { leftEyeX += shape.GetPart(i).X; leftEyeY += shape.GetPart(i).Y; }
+                    for (uint i = 42; i <= 47; i++) { rightEyeX += shape.GetPart(i).X; rightEyeY += shape.GetPart(i).Y; }
+
+                    leftEyeX /= 6.0f; leftEyeY /= 6.0f; rightEyeX /= 6.0f; rightEyeY /= 6.0f;
+
+                    eyeLineY = (leftEyeY + rightEyeY) / 2.0f;
+                    float noseBridgeX = shape.GetPart(27).X;
+                    faceCenterX = (((leftEyeX + rightEyeX) / 2.0f) + noseBridgeX) / 2.0f;
+                }
+                finally { if (File.Exists(detectTempFile)) File.Delete(detectTempFile); }
+
+                // --- 3. Face-Aware Lighting ---
+                using Bitmap litImage = fixLighting
+                    ? ApplyFaceAwareLightingBalance(leveledImage, faceLeft, faceRight, browLineY, chinBottomY)
+                    : new Bitmap(leveledImage);
+
+                // --- 4. Crop ROI ---
+                int browToChin = Math.Max(30, chinBottomY - browLineY);
+                int halfRoiWidth = (int)Math.Round(browToChin * 1.65f);
+                int roiLeft = Math.Clamp((int)Math.Round(faceCenterX) - halfRoiWidth, 0, litImage.Width - 1);
+                int roiRight = Math.Clamp((int)Math.Round(faceCenterX) + halfRoiWidth, roiLeft + 1, litImage.Width);
+                int roiTop = Math.Clamp(browLineY - (int)Math.Round(browToChin * 1.35f), 0, litImage.Height - 1);
+                int roiBottom = Math.Clamp(chinBottomY + (int)Math.Round(browToChin * 1.45f), roiTop + 1, litImage.Height);
+
+                var roiRect = new System.Drawing.Rectangle(roiLeft, roiTop, roiRight - roiLeft, roiBottom - roiTop);
+                using Bitmap roiImage = CropBitmap(litImage, roiRect);
+
+                int roiFaceLeft = faceLeft - roiLeft;
+                int roiFaceRight = faceRight - roiLeft;
+                int roiBrowLineY = browLineY - roiTop;
+                int roiChinBottomY = chinBottomY - roiTop;
+                float roiEyeLineY = eyeLineY - roiTop;
+                float roiFaceCenterX = faceCenterX - roiLeft;
+
+                // --- 5. Matting & Color Decontamination ---
+                using Bitmap coarseMask = GetCoarsePortraitMaskWithTTA(roiImage);
+                int roiHairTopY = DetectHairTopY(coarseMask, roiFaceLeft, roiFaceRight, roiBrowLineY, roiChinBottomY, roiFaceCenterX);
+
+                using Bitmap refinedAlpha = RefineAlphaWithLumaChromaGuidedFilter(roiImage, coarseMask, roiBrowLineY, edgeMode);
+                using Bitmap decontaminatedWhiteBg = CompositeWithColorDecontamination(roiImage, refinedAlpha);
+
+                int rawHeadHeight = roiChinBottomY - roiHairTopY;
+                if (rawHeadHeight <= 20)
+                    throw new Exception("Could not measure valid head height from facial landmarks.");
+
+                // --- 6. U.S. Framing Solver ---
+                float targetHeadRatio = 0.56f;
+                float scale = (targetSize * targetHeadRatio) / rawHeadHeight;
+
+                if (scale > 4.5f)
+                    throw new Exception("Face is too small/far away to yield a sharp 2x2\" visa photo.");
+
+                float scaledHairTopY = roiHairTopY * scale;
+                float scaledEyeLineY = roiEyeLineY * scale;
+                float eyeOffsetFromHairTop = scaledEyeLineY - scaledHairTopY;
+
+                float desiredEyeFromTop = targetSize * (1.0f - 0.60f);
+                float desiredHairTopFromTop = desiredEyeFromTop - eyeOffsetFromHairTop;
+                float minHairTopFromTop = targetSize * 0.07f;
+
+                if (desiredHairTopFromTop < minHairTopFromTop)
+                {
+                    desiredHairTopFromTop = minHairTopFromTop;
+                    desiredEyeFromTop = desiredHairTopFromTop + eyeOffsetFromHairTop;
+                    float eyeFromBottomRatio = (targetSize - desiredEyeFromTop) / targetSize;
+                    if (eyeFromBottomRatio < 0.565f && eyeOffsetFromHairTop > 1f)
+                    {
+                        float maxAllowedEyeFromTop = targetSize * (1.0f - 0.57f);
+                        float maxAllowedCrownToEye = maxAllowedEyeFromTop - minHairTopFromTop;
+                        float adjustFactor = maxAllowedCrownToEye / eyeOffsetFromHairTop;
+                        scale *= adjustFactor;
+                        scaledEyeLineY = roiEyeLineY * scale;
+                        desiredEyeFromTop = maxAllowedEyeFromTop;
+                    }
                 }
 
-                leftEyeX /= 6.0f;
-                leftEyeY /= 6.0f;
-                rightEyeX /= 6.0f;
-                rightEyeY /= 6.0f;
+                int offsetX = (int)Math.Round((targetSize / 2.0f) - (roiFaceCenterX * scale));
+                int offsetY = (int)Math.Round(desiredEyeFromTop - scaledEyeLineY);
 
-                eyeLineY = (leftEyeY + rightEyeY) / 2.0f;
-                float noseBridgeX = shape.GetPart(27).X;
-                faceCenterX = (((leftEyeX + rightEyeX) / 2.0f) + noseBridgeX) / 2.0f;
+                int scaledWidth = Math.Max(1, (int)Math.Round(decontaminatedWhiteBg.Width * scale));
+                int scaledHeight = Math.Max(1, (int)Math.Round(decontaminatedWhiteBg.Height * scale));
+
+                using Bitmap finalImage = new Bitmap(targetSize, targetSize, PixelFormat.Format24bppRgb);
+                finalImage.SetResolution(dpi, dpi);
+
+                using (Graphics g = Graphics.FromImage(finalImage))
+                {
+                    g.Clear(System.Drawing.Color.White);
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.SmoothingMode = SmoothingMode.HighQuality;
+                    g.CompositingQuality = CompositingQuality.HighQuality;
+                    g.DrawImage(decontaminatedWhiteBg, offsetX, offsetY, scaledWidth, scaledHeight);
+                }
+
+                // --- 7. Export ---
+                if (string.Equals(format, "PNG", StringComparison.OrdinalIgnoreCase))
+                    finalImage.Save(outputPath, ImageFormat.Png);
+                else if (isPrintMode)
+                    SaveJpegWithQuality(finalImage, outputPath, 98);
+                else
+                    SaveUnder240KbJpeg(finalImage, outputPath);
             }
             finally
             {
-                if (File.Exists(tempFile)) File.Delete(tempFile);
+                leveledImage.Dispose();
             }
-
-            // 2. Apply Face-Aware Lighting Correction (if requested)
-            using Bitmap litImage = fixLighting
-                ? ApplyFaceAwareLightingBalance(workingImage, faceLeft, faceRight, browLineY, chinBottomY)
-                : new Bitmap(workingImage);
-
-            // 3. Crop Head-and-Shoulders ROI for maximum edge precision
-            int browToChin = Math.Max(30, chinBottomY - browLineY);
-            int halfRoiWidth = (int)Math.Round(browToChin * 1.65f);
-            int roiLeft = Math.Clamp((int)Math.Round(faceCenterX) - halfRoiWidth, 0, litImage.Width - 1);
-            int roiRight = Math.Clamp((int)Math.Round(faceCenterX) + halfRoiWidth, roiLeft + 1, litImage.Width);
-            int roiTop = Math.Clamp(browLineY - (int)Math.Round(browToChin * 1.35f), 0, litImage.Height - 1);
-            int roiBottom = Math.Clamp(chinBottomY + (int)Math.Round(browToChin * 1.45f), roiTop + 1, litImage.Height);
-
-            var roiRect = new System.Drawing.Rectangle(roiLeft, roiTop, roiRight - roiLeft, roiBottom - roiTop);
-            using Bitmap roiImage = CropBitmap(litImage, roiRect);
-
-            // Shift coordinates into ROI space
-            int roiFaceLeft = faceLeft - roiLeft;
-            int roiFaceRight = faceRight - roiLeft;
-            int roiBrowLineY = browLineY - roiTop;
-            int roiChinBottomY = chinBottomY - roiTop;
-            float roiEyeLineY = eyeLineY - roiTop;
-            float roiFaceCenterX = faceCenterX - roiLeft;
-
-            // 4. Multi-pass TTA Segmentation + Luma/Chroma Guided Matting + Foreground Color Decontamination
-            using Bitmap coarseMask = GetCoarsePortraitMaskWithTTA(roiImage);
-            int roiHairTopY = DetectHairTopY(coarseMask, roiFaceLeft, roiFaceRight, roiBrowLineY, roiChinBottomY, roiFaceCenterX);
-
-            using Bitmap refinedAlpha = RefineAlphaWithLumaChromaGuidedFilter(roiImage, coarseMask, roiBrowLineY, edgeMode);
-            using Bitmap decontaminatedWhiteBg = CompositeWithColorDecontamination(roiImage, refinedAlpha);
-
-            int rawHeadHeight = roiChinBottomY - roiHairTopY;
-            if (rawHeadHeight <= 20)
-                throw new Exception("Could not measure valid head height from facial landmarks.");
-
-            // 5. U.S. Department of State Framing Solver (Head: 50%-69%, Eyes from bottom: 56%-69%)
-            float targetHeadRatio = 0.56f;
-            float scale = (targetSize * targetHeadRatio) / rawHeadHeight;
-
-            if (scale > 4.5f)
-                throw new Exception("Face is too small/far away to yield a sharp 2x2\" visa photo.");
-
-            float scaledHairTopY = roiHairTopY * scale;
-            float scaledEyeLineY = roiEyeLineY * scale;
-            float eyeOffsetFromHairTop = scaledEyeLineY - scaledHairTopY;
-
-            float desiredEyeFromTop = targetSize * (1.0f - 0.60f);
-            float desiredHairTopFromTop = desiredEyeFromTop - eyeOffsetFromHairTop;
-
-            float minHairTopFromTop = targetSize * 0.07f;
-            if (desiredHairTopFromTop < minHairTopFromTop)
-            {
-                desiredHairTopFromTop = minHairTopFromTop;
-                desiredEyeFromTop = desiredHairTopFromTop + eyeOffsetFromHairTop;
-
-                float eyeFromBottomRatio = (targetSize - desiredEyeFromTop) / targetSize;
-                if (eyeFromBottomRatio < 0.565f && eyeOffsetFromHairTop > 1f)
-                {
-                    float maxAllowedEyeFromTop = targetSize * (1.0f - 0.57f);
-                    float maxAllowedCrownToEye = maxAllowedEyeFromTop - minHairTopFromTop;
-                    float adjustFactor = maxAllowedCrownToEye / eyeOffsetFromHairTop;
-                    scale *= adjustFactor;
-                    scaledEyeLineY = roiEyeLineY * scale;
-                    desiredEyeFromTop = maxAllowedEyeFromTop;
-                }
-            }
-
-            int offsetX = (int)Math.Round((targetSize / 2.0f) - (roiFaceCenterX * scale));
-            int offsetY = (int)Math.Round(desiredEyeFromTop - scaledEyeLineY);
-
-            int scaledWidth = Math.Max(1, (int)Math.Round(decontaminatedWhiteBg.Width * scale));
-            int scaledHeight = Math.Max(1, (int)Math.Round(decontaminatedWhiteBg.Height * scale));
-
-            using Bitmap finalImage = new Bitmap(targetSize, targetSize, PixelFormat.Format24bppRgb);
-            finalImage.SetResolution(dpi, dpi);
-
-            using (Graphics g = Graphics.FromImage(finalImage))
-            {
-                g.Clear(System.Drawing.Color.White);
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                g.SmoothingMode = SmoothingMode.HighQuality;
-                g.CompositingQuality = CompositingQuality.HighQuality;
-                g.DrawImage(decontaminatedWhiteBg, offsetX, offsetY, scaledWidth, scaledHeight);
-            }
-
-            // 6. Export
-            if (string.Equals(format, "PNG", StringComparison.OrdinalIgnoreCase))
-                finalImage.Save(outputPath, ImageFormat.Png);
-            else if (isPrintMode)
-                SaveJpegWithQuality(finalImage, outputPath, 98);
-            else
-                SaveUnder240KbJpeg(finalImage, outputPath);
         }
 
         private static Bitmap ApplyFaceAwareLightingBalance(Bitmap source, int faceLeft, int faceRight, int browLineY, int chinBottomY)
