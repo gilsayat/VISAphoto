@@ -1,0 +1,45 @@
+name: Build USVisaPhotoAutomator Windows EXE
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore USVisaPhotoAutomator.csproj
+
+      - name: Publish self-contained single-file EXE (win-x64)
+        run: >
+          dotnet publish USVisaPhotoAutomator.csproj
+          -c Release
+          -r win-x64
+          --no-restore
+          /p:PublishSingleFile=true
+          /p:SelfContained=true
+          /p:IncludeNativeLibrariesForSelfExtract=true
+          -o ./Publish
+
+      - name: Create Models placeholder folder in Publish output
+        run: New-Item -ItemType Directory -Force -Path ./Publish/Models
+
+      - name: Upload USVisaPhotoAutomator EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: USVisaPhotoAutomator-win-x64
+          path: ./Publish/
+          retention-days: 30
