@@ -15,7 +15,9 @@ namespace USVisaPhotoAutomator
     public partial class MainWindow : Window
     {
         private readonly VisaPhotoProcessor _processor;
+        private string? _lastInputPath;
         private string? _lastOutputPath;
+        private bool _isProcessing;
 
         public MainWindow()
         {
@@ -23,7 +25,6 @@ namespace USVisaPhotoAutomator
             string modelsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Models");
             _processor = new VisaPhotoProcessor(modelsDir);
 
-            // Pre-warm AI models on a background thread as soon as the app opens
             Task.Run(() =>
             {
                 try
@@ -78,6 +79,14 @@ namespace USVisaPhotoAutomator
             }
         }
 
+        private async void Settings_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!IsLoaded || _isProcessing || string.IsNullOrEmpty(_lastInputPath) || !File.Exists(_lastInputPath))
+                return;
+
+            await ProcessFileAsync(_lastInputPath);
+        }
+
         private async Task HandleImageSelectionAsync(string? filePath)
         {
             if (string.IsNullOrEmpty(filePath) || !IsImageFile(filePath))
@@ -85,6 +94,8 @@ namespace USVisaPhotoAutomator
                 UpdateStatus("Error: Invalid image file.", "#FF5C5C");
                 return;
             }
+
+            _lastInputPath = filePath;
             await ProcessFileAsync(filePath);
         }
 
@@ -94,11 +105,26 @@ namespace USVisaPhotoAutomator
             return ext == ".jpg" || ext == ".jpeg" || ext == ".png";
         }
 
+        private EdgeFeatherMode GetSelectedEdgeMode()
+        {
+            string? tag = (CmbEdgeMode?.SelectedItem as ComboBoxItem)?.Tag?.ToString();
+            return tag switch
+            {
+                "Sharp" => EdgeFeatherMode.Sharp,
+                "Balanced" => EdgeFeatherMode.Balanced,
+                "Soft" => EdgeFeatherMode.Soft,
+                _ => EdgeFeatherMode.AutoSmart
+            };
+        }
+
         private async Task ProcessFileAsync(string inputPath)
         {
+            if (_isProcessing) return;
+            _isProcessing = true;
+
             try
             {
-                UpdateStatus("Processing AI Image (Fast)...", "#FFD700");
+                UpdateStatus("Processing AI Image...", "#FFD700");
                 PlaceholderUI.Visibility = Visibility.Collapsed;
                 PreviewImage.Visibility = Visibility.Collapsed;
                 BtnOpenFolder.Visibility = Visibility.Collapsed;
@@ -106,6 +132,7 @@ namespace USVisaPhotoAutomator
 
                 string format = (CmbFormat.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "JPG";
                 bool isPrintMode = ChkPrintMode.IsChecked == true;
+                EdgeFeatherMode edgeMode = GetSelectedEdgeMode();
 
                 string ext = format.ToLowerInvariant();
                 string outputFilename = $"{Path.GetFileNameWithoutExtension(inputPath)}_VisaCompliant.{ext}";
@@ -113,11 +140,10 @@ namespace USVisaPhotoAutomator
                 string outputPath = Path.Combine(outputDir, outputFilename);
                 _lastOutputPath = outputPath;
 
-                // Processing will be incredibly fast since models are pre-cached
-                await Task.Run(() => _processor.ProcessVisaPhoto(inputPath, outputPath, format, isPrintMode));
+                await Task.Run(() => _processor.ProcessVisaPhoto(inputPath, outputPath, format, isPrintMode, edgeMode));
 
                 ShowPreview(outputPath);
-                UpdateStatus("Compliant & Saved!", "#00FF7F");
+                UpdateStatus($"Compliant & Saved ({edgeMode})!", "#00FF7F");
                 BtnOpenFolder.Visibility = Visibility.Visible;
             }
             catch (Exception ex)
@@ -128,6 +154,7 @@ namespace USVisaPhotoAutomator
             finally
             {
                 ProcessingProgress.Visibility = Visibility.Collapsed;
+                _isProcessing = false;
             }
         }
 
@@ -135,7 +162,7 @@ namespace USVisaPhotoAutomator
         {
             BitmapImage bitmap = new BitmapImage();
             bitmap.BeginInit();
-            bitmap.CacheOption = BitmapCacheOption.OnLoad; // Releases file lock quickly
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
             bitmap.CreateOptions = BitmapCreateOptions.IgnoreImageCache;
             bitmap.UriSource = new Uri(path);
             bitmap.EndInit();
@@ -162,7 +189,7 @@ namespace USVisaPhotoAutomator
 
         protected override void OnClosed(EventArgs e)
         {
-            _processor.Dispose(); // Prevent unmanaged memory leaks on exit
+            _processor.Dispose();
             base.OnClosed(e);
         }
     }
