@@ -13,22 +13,21 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup .NET 8 SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
 
-      - name: Restore dependencies
-        run: dotnet restore USVisaPhotoAutomator.csproj
+      - name: Restore win-x64 dependencies
+        run: dotnet restore -r win-x64
 
       - name: Publish self-contained single-file EXE (win-x64)
         run: >
-          dotnet publish USVisaPhotoAutomator.csproj
+          dotnet publish
           -c Release
           -r win-x64
-          --no-restore
           /p:PublishSingleFile=true
           /p:SelfContained=true
           /p:IncludeNativeLibrariesForSelfExtract=true
