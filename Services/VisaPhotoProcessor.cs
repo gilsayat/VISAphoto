@@ -1,14 +1,11 @@
 using DlibDotNet;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Jpeg;
-using SixLabors.ImageSharp.Formats.Png;
-using SixLabors.ImageSharp.Metadata;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
 using System;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 
@@ -53,28 +50,29 @@ namespace USVisaPhotoAutomator.Services
             if (!File.Exists(_dlibModelPath))
                 throw new FileNotFoundException("shape_predictor_68_face_landmarks.dat is missing.");
 
-            // U.S. Department of State digital dimensions: 600x600 min to 1200x1200 max square pixels.
-            // Use 1200x1200 (max acceptable square resolution) for highest detail, and 600 DPI / 300 DPI metadata.
+            // U.S. Department of State digital square size: 600x600 min to 1200x1200 max pixels.
             int targetSize = isPrintMode ? 1200 : 600;
-            double dpi = isPrintMode ? 600.0 : 300.0;
+            float dpi = isPrintMode ? 600f : 300f;
 
-            // Head height (top of head/hair to bottom of chin): 50% - 69% of image height (target 60%).
+            // Head height (top of head/hair to chin): 50% - 69% of image height (target 60%).
             // Eye height from bottom of photo to eye line: 56% - 69% of image height (target 62.5%).
             const float targetHeadRatio = 0.60f;
             const float targetEyeRatioFromBottom = 0.625f;
 
-            using var originalImage = Image.Load<Rgb24>(inputPath);
+            using Bitmap originalImage = LoadOrientedBitmap(inputPath);
             if (originalImage.Width < 200 || originalImage.Height < 200)
                 throw new Exception("Source image resolution is too low for a crisp visa photo.");
 
-            // 1. Background matting & pure white (#FFFFFF) replacement
-            using var alphaMask = GetPortraitAlphaMask(originalImage);
-            using var whiteBgImage = originalImage.Clone();
-            ApplyPureWhiteBackground(whiteBgImage, alphaMask);
+            // Cap working resolution at 1600px on longest side for reliable detection & speed
+            using Bitmap workingImage = ResizeIfLarger(originalImage, 1600);
 
-            // 2. Detect facial landmarks on the clean white-background portrait
-            string tempFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString() + ".bmp");
-            whiteBgImage.SaveAsBmp(tempFile);
+            // 1. Background matting & pure white (#FFFFFF) replacement
+            using Bitmap alphaMask = GetPortraitAlphaMask(workingImage);
+            using Bitmap whiteBgImage = ApplyPureWhiteBackground(workingImage, alphaMask);
+
+            // 2. Detect facial landmarks on the upright, white-background portrait
+            string tempFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".bmp");
+            whiteBgImage.Save(tempFile, ImageFormat.Bmp);
 
             int headTop, chinBottom, eyeLineY, faceCenterX;
 
@@ -84,21 +82,20 @@ namespace USVisaPhotoAutomator.Services
                 using var predictor = ShapePredictor.Deserialize(_dlibModelPath);
                 using var dlibImg = Dlib.LoadImage<RgbPixel>(tempFile);
 
-                var faces = detector.Operator(dlibImg);
+                var faces = detector.Operator(dlibImg, 1);
                 if (faces.Length == 0)
-                    throw new Exception("No face detected in the image.");
+                    throw new Exception("No face detected in the image. Ensure the face is forward-facing and upright.");
                 if (faces.Length > 1)
                     throw new Exception("Multiple faces detected. Visa photos must contain only one person.");
 
-                var face = faces[0];
-                var shape = predictor.Detect(dlibImg, face);
+                var face = faces.OrderByDescending(r => r.Width * r.Height).First();
+                using var shape = predictor.Detect(dlibImg, face);
 
-                // Estimate crown/hairline slightly above the frontal face box while keeping chin at landmark 8
-                int boxHeight = Math.Max(1, face.Bottom - face.Top);
-                int estimatedCrown = Math.Max(0, face.Top - (int)(boxHeight * 0.14f));
+                int boxHeight = Math.Max(1, (int)face.Height);
+                int estimatedCrown = Math.Max(0, (int)face.Top - (int)(boxHeight * 0.14f));
                 headTop = estimatedCrown;
                 chinBottom = (int)shape.GetPart(8).Y;
-                faceCenterX = (face.Left + face.Right) / 2;
+                faceCenterX = ((int)face.Left + (int)face.Right) / 2;
 
                 float leftEyeY = 0, rightEyeY = 0;
                 for (uint i = 36; i <= 41; i++) leftEyeY += shape.GetPart(i).Y;
@@ -115,10 +112,8 @@ namespace USVisaPhotoAutomator.Services
             if (currentHeadHeight <= 0)
                 throw new Exception("Could not measure valid head height.");
 
-            // 3. Scale so head height is ~60% of targetSize (strictly inside 50%-69%)
+            // 3. Scale so head height is ~60% of targetSize (inside 50% - 69%)
             float scale = (targetSize * targetHeadRatio) / currentHeadHeight;
-
-            // Guard against severe upscaling blur
             if (scale > 4.0f)
                 throw new Exception("Face in source photo is too small for high-quality visa output.");
 
@@ -131,151 +126,287 @@ namespace USVisaPhotoAutomator.Services
             int offsetX = targetCenterX - scaledFaceCenterX;
             int offsetY = targetEyeLineY - scaledEyeLineY;
 
-            // Ensure top of head/hair has clean pure white padding if offsetY pushes top edge down
             int scaledWidth = Math.Max(1, (int)Math.Round(whiteBgImage.Width * scale));
             int scaledHeight = Math.Max(1, (int)Math.Round(whiteBgImage.Height * scale));
 
-            using var finalImage = new Image<Rgb24>(targetSize, targetSize);
-            finalImage.Mutate(ctx => ctx.BackgroundColor(Color.White));
+            using Bitmap finalImage = new Bitmap(targetSize, targetSize, PixelFormat.Format24bppRgb);
+            finalImage.SetResolution(dpi, dpi);
 
-            whiteBgImage.Mutate(ctx => ctx.Resize(new ResizeOptions
+            using (Graphics g = Graphics.FromImage(finalImage))
             {
-                Size = new Size(scaledWidth, scaledHeight),
-                Sampler = KnownResamplers.Lanczos3
-            }));
+                g.Clear(System.Drawing.Color.White);
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.SmoothingMode = SmoothingMode.HighQuality;
+                g.CompositingQuality = CompositingQuality.HighQuality;
 
-            finalImage.Mutate(ctx => ctx.DrawImage(
-                whiteBgImage,
-                new SixLabors.ImageSharp.Point(offsetX, offsetY),
-                1f));
+                g.DrawImage(whiteBgImage, offsetX, offsetY, scaledWidth, scaledHeight);
+            }
 
-            // 4. Embed high-DPI resolution metadata
-            finalImage.Metadata.HorizontalResolution = dpi;
-            finalImage.Metadata.VerticalResolution = dpi;
-            finalImage.Metadata.ResolutionUnits = PixelResolutionUnit.PixelsPerInch;
-
-            // US Visa digital uploads require JPEG (<= 240 KB); print/archival mode uses lossless PNG or 98% JPEG
+            // 4. Export format & size rules
             if (string.Equals(format, "PNG", StringComparison.OrdinalIgnoreCase))
             {
-                finalImage.Save(outputPath, new PngEncoder
-                {
-                    CompressionLevel = PngCompressionLevel.BestCompression
-                });
+                finalImage.Save(outputPath, ImageFormat.Png);
             }
             else if (isPrintMode)
             {
-                finalImage.Save(outputPath, new JpegEncoder { Quality = 98 });
+                SaveJpegWithQuality(finalImage, outputPath, 98);
             }
             else
             {
-                // Fit JPEG under 240 KB while preserving maximum sharpness
                 SaveUnder240KbJpeg(finalImage, outputPath);
             }
         }
 
-        private static void SaveUnder240KbJpeg(Image<Rgb24> image, string outputPath)
+        private static Bitmap LoadOrientedBitmap(string inputPath)
+        {
+            using var rawImg = System.Drawing.Image.FromFile(inputPath);
+            var bmp = new Bitmap(rawImg);
+
+            const int orientationTagId = 0x0112;
+            if (Array.IndexOf(rawImg.PropertyIdList, orientationTagId) >= 0)
+            {
+                var prop = rawImg.GetPropertyItem(orientationTagId);
+                if (prop?.Value != null && prop.Value.Length >= 2)
+                {
+                    ushort orientation = BitConverter.ToUInt16(prop.Value, 0);
+                    switch (orientation)
+                    {
+                        case 2: bmp.RotateFlip(RotateFlipType.RotateNoneFlipX); break;
+                        case 3: bmp.RotateFlip(RotateFlipType.Rotate180FlipNone); break;
+                        case 4: bmp.RotateFlip(RotateFlipType.Rotate180FlipX); break;
+                        case 5: bmp.RotateFlip(RotateFlipType.Rotate90FlipX); break;
+                        case 6: bmp.RotateFlip(RotateFlipType.Rotate90FlipNone); break;
+                        case 7: bmp.RotateFlip(RotateFlipType.Rotate270FlipX); break;
+                        case 8: bmp.RotateFlip(RotateFlipType.Rotate270FlipNone); break;
+                    }
+                }
+            }
+
+            return bmp;
+        }
+
+        private static Bitmap ResizeIfLarger(Bitmap source, int maxDim)
+        {
+            if (source.Width <= maxDim && source.Height <= maxDim)
+                return new Bitmap(source);
+
+            double ratio = Math.Min((double)maxDim / source.Width, (double)maxDim / source.Height);
+            int w = Math.Max(1, (int)Math.Round(source.Width * ratio));
+            int h = Math.Max(1, (int)Math.Round(source.Height * ratio));
+
+            var resized = new Bitmap(w, h, PixelFormat.Format24bppRgb);
+            using var g = Graphics.FromImage(resized);
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.SmoothingMode = SmoothingMode.HighQuality;
+            g.DrawImage(source, 0, 0, w, h);
+            return resized;
+        }
+
+        private Bitmap GetPortraitAlphaMask(Bitmap sourceImage)
+        {
+            const int dim = 320;
+            using var resized = new Bitmap(dim, dim, PixelFormat.Format24bppRgb);
+            using (var g = Graphics.FromImage(resized))
+            {
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.DrawImage(sourceImage, 0, 0, dim, dim);
+            }
+
+            var tensor = new DenseTensor<float>(new[] { 1, 3, dim, dim });
+            var rect = new Rectangle(0, 0, dim, dim);
+            var bmpData = resized.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+
+            try
+            {
+                unsafe
+                {
+                    byte* basePtr = (byte*)bmpData.Scan0;
+                    int stride = bmpData.Stride;
+
+                    for (int y = 0; y < dim; y++)
+                    {
+                        byte* row = basePtr + (y * stride);
+                        for (int x = 0; x < dim; x++)
+                        {
+                            // Format24bppRgb in System.Drawing is B, G, R in memory
+                            byte b = row[x * 3];
+                            byte gVal = row[x * 3 + 1];
+                            byte r = row[x * 3 + 2];
+
+                            tensor[0, 0, y, x] = (r / 255f - 0.485f) / 0.229f;
+                            tensor[0, 1, y, x] = (gVal / 255f - 0.456f) / 0.224f;
+                            tensor[0, 2, y, x] = (b / 255f - 0.406f) / 0.225f;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                resized.UnlockBits(bmpData);
+            }
+
+            var session = GetOrCreateSession();
+            string inputName = session.InputMetadata.Keys.FirstOrDefault() ?? "input.1";
+            var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(inputName, tensor) };
+
+            using var results = session.Run(inputs);
+            var outTensor = results.First().AsTensor<float>();
+
+            float min = float.MaxValue, max = float.MinValue;
+            foreach (float val in outTensor)
+            {
+                if (val < min) min = val;
+                if (val > max) max = val;
+            }
+            float range = max - min;
+
+            using var smallMask = new Bitmap(dim, dim, PixelFormat.Format24bppRgb);
+            var maskRect = new Rectangle(0, 0, dim, dim);
+            var maskData = smallMask.LockBits(maskRect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+
+            try
+            {
+                unsafe
+                {
+                    byte* basePtr = (byte*)maskData.Scan0;
+                    int stride = maskData.Stride;
+
+                    for (int y = 0; y < dim; y++)
+                    {
+                        byte* row = basePtr + (y * stride);
+                        for (int x = 0; x < dim; x++)
+                        {
+                            float val = outTensor[0, 0, y, x];
+                            float norm = range > 1e-6f ? Math.Clamp((val - min) / range, 0f, 1f) : 0f;
+                            if (norm < 0.08f) norm = 0f;
+                            else if (norm > 0.92f) norm = 1f;
+
+                            byte m = (byte)Math.Round(norm * 255f);
+                            row[x * 3] = m;
+                            row[x * 3 + 1] = m;
+                            row[x * 3 + 2] = m;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                smallMask.UnlockBits(maskData);
+            }
+
+            var fullResMask = new Bitmap(sourceImage.Width, sourceImage.Height, PixelFormat.Format24bppRgb);
+            using var gm = Graphics.FromImage(fullResMask);
+            gm.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            gm.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            gm.DrawImage(smallMask, 0, 0, sourceImage.Width, sourceImage.Height);
+            return fullResMask;
+        }
+
+        private static Bitmap ApplyPureWhiteBackground(Bitmap image, Bitmap mask)
+        {
+            int width = image.Width;
+            int height = image.Height;
+            var result = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+
+            using var srcCopy = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            using var maskCopy = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            using (var g1 = Graphics.FromImage(srcCopy)) g1.DrawImage(image, 0, 0, width, height);
+            using (var g2 = Graphics.FromImage(maskCopy)) g2.DrawImage(mask, 0, 0, width, height);
+
+            var rect = new Rectangle(0, 0, width, height);
+            var srcData = srcCopy.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            var mskData = maskCopy.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            var dstData = result.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+
+            try
+            {
+                unsafe
+                {
+                    byte* srcBase = (byte*)srcData.Scan0;
+                    byte* mskBase = (byte*)mskData.Scan0;
+                    byte* dstBase = (byte*)dstData.Scan0;
+
+                    for (int y = 0; y < height; y++)
+                    {
+                        byte* sRow = srcBase + (y * srcData.Stride);
+                        byte* mRow = mskBase + (y * mskData.Stride);
+                        byte* dRow = dstBase + (y * dstData.Stride);
+
+                        for (int x = 0; x < width; x++)
+                        {
+                            int idx = x * 3;
+                            float alpha = mRow[idx] / 255f;
+
+                            byte b = (byte)Math.Clamp(Math.Round(sRow[idx] * alpha + 255f * (1f - alpha)), 0, 255);
+                            byte g = (byte)Math.Clamp(Math.Round(sRow[idx + 1] * alpha + 255f * (1f - alpha)), 0, 255);
+                            byte r = (byte)Math.Clamp(Math.Round(sRow[idx + 2] * alpha + 255f * (1f - alpha)), 0, 255);
+
+                            dRow[idx] = b;
+                            dRow[idx + 1] = g;
+                            dRow[idx + 2] = r;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                srcCopy.UnlockBits(srcData);
+                maskCopy.UnlockBits(mskData);
+                result.UnlockBits(dstData);
+            }
+
+            return result;
+        }
+
+        private static ImageCodecInfo? GetJpegCodec()
+        {
+            return ImageCodecInfo.GetImageEncoders().FirstOrDefault(c => c.FormatID == ImageFormat.Jpeg.Guid);
+        }
+
+        private static void SaveJpegWithQuality(Bitmap image, string outputPath, int quality)
+        {
+            var codec = GetJpegCodec();
+            if (codec == null)
+            {
+                image.Save(outputPath, ImageFormat.Jpeg);
+                return;
+            }
+
+            using var encoderParams = new EncoderParameters(1);
+            encoderParams.Param[0] = new EncoderParameter(Encoder.Quality, (long)quality);
+            image.Save(outputPath, codec, encoderParams);
+        }
+
+        private static void SaveUnder240KbJpeg(Bitmap image, string outputPath)
         {
             const int maxBytes = 240 * 1024;
+            var codec = GetJpegCodec();
+            if (codec == null)
+            {
+                image.Save(outputPath, ImageFormat.Jpeg);
+                return;
+            }
+
             int quality = 92;
             byte[] bestBytes = Array.Empty<byte>();
 
             while (quality >= 50)
             {
                 using var ms = new MemoryStream();
-                image.Save(ms, new JpegEncoder { Quality = quality });
-                byte[] bytes = ms.ToArray();
-                bestBytes = bytes;
-                if (bytes.Length <= maxBytes)
+                using var encoderParams = new EncoderParameters(1);
+                encoderParams.Param[0] = new EncoderParameter(Encoder.Quality, (long)quality);
+                image.Save(ms, codec, encoderParams);
+
+                bestBytes = ms.ToArray();
+                if (bestBytes.Length <= maxBytes)
                     break;
                 quality -= 4;
             }
 
             File.WriteAllBytes(outputPath, bestBytes);
-        }
-
-        private Image<L8> GetPortraitAlphaMask(Image<Rgb24> sourceImage)
-{
-    const int dim = 320;
-    using var resized = sourceImage.Clone(x => x.Resize(new ResizeOptions
-    {
-        Size = new Size(dim, dim),
-        Sampler = KnownResamplers.Lanczos3
-    }));
-
-    var tensor = new DenseTensor<float>(new[] { 1, 3, dim, dim });
-    resized.ProcessPixelRows(accessor =>
-    {
-        for (int y = 0; y < dim; y++)
-        {
-            var row = accessor.GetRowSpan(y);
-            for (int x = 0; x < dim; x++)
-            {
-                tensor[0, 0, y, x] = (row[x].R / 255f - 0.485f) / 0.229f;
-                tensor[0, 1, y, x] = (row[x].G / 255f - 0.456f) / 0.224f;
-                tensor[0, 2, y, x] = (row[x].B / 255f - 0.406f) / 0.225f;
-            }
-        }
-    });
-
-    var session = GetOrCreateSession();
-    string inputName = session.InputMetadata.Keys.FirstOrDefault() ?? "input.1";
-    var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(inputName, tensor) };
-
-    using var results = session.Run(inputs);
-    var outTensor = results.First().AsTensor<float>();
-
-    float min = float.MaxValue, max = float.MinValue;
-    foreach (float val in outTensor)
-    {
-        if (val < min) min = val;
-        if (val > max) max = val;
-    }
-    float range = max - min;
-
-    using var smallMask = new Image<L8>(dim, dim);
-    smallMask.ProcessPixelRows(accessor =>
-    {
-        for (int y = 0; y < dim; y++)
-        {
-            var row = accessor.GetRowSpan(y);
-            for (int x = 0; x < dim; x++)
-            {
-                float val = outTensor[0, 0, y, x];
-                float norm = range > 1e-6f ? Math.Clamp((val - min) / range, 0f, 1f) : 0f;
-                if (norm < 0.08f) norm = 0f;
-                else if (norm > 0.92f) norm = 1f;
-                row[x] = new L8((byte)Math.Round(norm * 255f));
-            }
-        }
-    });
-
-    var fullResMask = smallMask.Clone(x => x.Resize(new ResizeOptions
-    {
-        Size = new Size(sourceImage.Width, sourceImage.Height),
-        Sampler = KnownResamplers.Lanczos3
-    }));
-
-    return fullResMask;
-}
-
-        private static void ApplyPureWhiteBackground(Image<Rgb24> image, Image<L8> mask)
-        {
-            image.ProcessPixelRows(mask, (imgAccessor, maskAccessor) =>
-            {
-                for (int y = 0; y < image.Height; y++)
-                {
-                    var imgRow = imgAccessor.GetRowSpan(y);
-                    var maskRow = maskAccessor.GetRowSpan(y);
-                    for (int x = 0; x < image.Width; x++)
-                    {
-                        float alpha = maskRow[x].PackedValue / 255f;
-                        byte r = (byte)Math.Clamp(Math.Round(imgRow[x].R * alpha + 255f * (1f - alpha)), 0, 255);
-                        byte g = (byte)Math.Clamp(Math.Round(imgRow[x].G * alpha + 255f * (1f - alpha)), 0, 255);
-                        byte b = (byte)Math.Clamp(Math.Round(imgRow[x].B * alpha + 255f * (1f - alpha)), 0, 255);
-                        imgRow[x] = new Rgb24(r, g, b);
-                    }
-                }
-            });
         }
 
         public void Dispose()
