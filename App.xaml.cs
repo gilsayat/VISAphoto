@@ -1,0 +1,1 @@
+using System.Windows; namespace USVisaPhotoAutomator { public partial class App : Application { } }
