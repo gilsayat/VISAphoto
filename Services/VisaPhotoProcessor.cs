@@ -15,7 +15,7 @@ namespace USVisaPhotoAutomator.Services
     {
         private readonly string _onnxModelPath;
         private readonly string _dlibModelPath;
-        
+
         private readonly object _modelLock = new object();
         private InferenceSession? _session;
         private FrontalFaceDetector? _detector;
@@ -36,13 +36,13 @@ namespace USVisaPhotoAutomator.Services
         private void EnsureModelsLoaded()
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(VisaPhotoProcessor));
-            
-            if (_session != null && _detector != null && _predictor != null) 
+
+            if (_session != null && _detector != null && _predictor != null)
                 return;
 
             lock (_modelLock)
             {
-                if (_session != null && _detector != null && _predictor != null) 
+                if (_session != null && _detector != null && _predictor != null)
                     return;
 
                 if (!File.Exists(_onnxModelPath))
@@ -69,11 +69,9 @@ namespace USVisaPhotoAutomator.Services
         {
             EnsureModelsLoaded();
 
+            // 1200x1200 @ 600 DPI = 2.0x2.0 in | 600x600 @ 300 DPI = 2.0x2.0 in
             int targetSize = isPrintMode ? 1200 : 600;
             float dpi = isPrintMode ? 600f : 300f;
-
-            const float targetHeadRatio = 0.60f;
-            const float targetEyeRatioFromBottom = 0.625f;
 
             using Bitmap originalImage = LoadOrientedBitmap(inputPath);
             if (originalImage.Width < 200 || originalImage.Height < 200)
@@ -81,24 +79,22 @@ namespace USVisaPhotoAutomator.Services
 
             using Bitmap workingImage = ResizeIfLarger(originalImage, 1600);
 
-            // 1. Matting
+            // 1. Background segmentation & pure white (#FFFFFF) replacement
             using Bitmap alphaMask = GetPortraitAlphaMask(workingImage);
             using Bitmap whiteBgImage = ApplyPureWhiteBackground(workingImage, alphaMask);
 
-            // 2. Detection (with Smart Multi-Scale Fallback)
+            // 2. Facial landmark detection with multi-scale fallback
             string tempFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".bmp");
             whiteBgImage.Save(tempFile, ImageFormat.Bmp);
 
-            int headTop, chinBottom, eyeLineY, faceCenterX;
+            int hairTopY, chinBottomY;
+            float eyeLineY, faceCenterX;
 
             try
             {
                 using var dlibImg = Dlib.LoadImage<RgbPixel>(tempFile);
 
-                // Smart Fallback: Try native scale first (best for large/close faces)
                 var faces = _detector!.Operator(dlibImg, 0);
-                
-                // If it misses, upsample the image to catch smaller/farther faces
                 if (faces.Length == 0)
                     faces = _detector.Operator(dlibImg, 1);
 
@@ -110,39 +106,83 @@ namespace USVisaPhotoAutomator.Services
                 var face = faces.OrderByDescending(r => r.Width * r.Height).First();
                 using var shape = _predictor!.Detect(dlibImg, face);
 
-                int boxHeight = Math.Max(1, (int)face.Height);
-                int estimatedCrown = Math.Max(0, (int)face.Top - (int)(boxHeight * 0.14f));
-                headTop = estimatedCrown;
-                chinBottom = (int)shape.GetPart(8).Y;
-                faceCenterX = ((int)face.Left + (int)face.Right) / 2;
+                // Chin bottom (points 7, 8, 9 cover chin base even with slight tilt)
+                chinBottomY = Math.Max((int)shape.GetPart(8).Y,
+                              Math.Max((int)shape.GetPart(7).Y, (int)shape.GetPart(9).Y));
 
-                float leftEyeY = 0, rightEyeY = 0;
-                for (uint i = 36; i <= 41; i++) leftEyeY += shape.GetPart(i).Y;
-                for (uint i = 42; i <= 47; i++) rightEyeY += shape.GetPart(i).Y;
-                eyeLineY = (int)((leftEyeY / 6.0f + rightEyeY / 6.0f) / 2.0f);
+                // Eye line Y and precise horizontal center from eyes + nose bridge
+                float leftEyeX = 0, leftEyeY = 0, rightEyeX = 0, rightEyeY = 0;
+                for (uint i = 36; i <= 41; i++)
+                {
+                    leftEyeX += shape.GetPart(i).X;
+                    leftEyeY += shape.GetPart(i).Y;
+                }
+                for (uint i = 42; i <= 47; i++)
+                {
+                    rightEyeX += shape.GetPart(i).X;
+                    rightEyeY += shape.GetPart(i).Y;
+                }
+
+                leftEyeX /= 6.0f;
+                leftEyeY /= 6.0f;
+                rightEyeX /= 6.0f;
+                rightEyeY /= 6.0f;
+
+                eyeLineY = (leftEyeY + rightEyeY) / 2.0f;
+                float noseBridgeX = shape.GetPart(27).X;
+                faceCenterX = (((leftEyeX + rightEyeX) / 2.0f) + noseBridgeX) / 2.0f;
+
+                // Measure actual top of hair using the U2-Net silhouette mask
+                hairTopY = DetectHairTopY(alphaMask, (int)face.Left, (int)face.Right, (int)face.Top, chinBottomY, faceCenterX);
             }
             finally
             {
                 if (File.Exists(tempFile)) File.Delete(tempFile);
             }
 
-            int currentHeadHeight = chinBottom - headTop;
-            if (currentHeadHeight <= 0)
+            int rawHeadHeight = chinBottomY - hairTopY;
+            if (rawHeadHeight <= 20)
                 throw new Exception("Could not measure valid head height from facial landmarks.");
 
-            // 3. Math & Crop
-            float scale = (targetSize * targetHeadRatio) / currentHeadHeight;
-            if (scale > 4.0f)
-                throw new Exception("Face is too small/far away to yield a high-quality 2x2\" visa photo.");
+            // 3. U.S. Department of State Framing Solver:
+            //    - Head height (hair top to chin): 50% - 69% of image height (target 56%)
+            //    - Eye height from bottom edge: 56% - 69% of image height (target 60%)
+            //    - Minimum 7% pure white headroom above hair so crown is never clipped
+            float targetHeadRatio = 0.56f;
+            float scale = (targetSize * targetHeadRatio) / rawHeadHeight;
 
-            int scaledEyeLineY = (int)(eyeLineY * scale);
-            int scaledFaceCenterX = (int)(faceCenterX * scale);
+            if (scale > 4.5f)
+                throw new Exception("Face is too small/far away to yield a sharp 2x2\" visa photo.");
 
-            int targetEyeLineY = targetSize - (int)(targetSize * targetEyeRatioFromBottom);
-            int targetCenterX = targetSize / 2;
+            float scaledHairTopY = hairTopY * scale;
+            float scaledEyeLineY = eyeLineY * scale;
+            float eyeOffsetFromHairTop = scaledEyeLineY - scaledHairTopY;
 
-            int offsetX = targetCenterX - scaledFaceCenterX;
-            int offsetY = targetEyeLineY - scaledEyeLineY;
+            // 60% from bottom = 40% down from top
+            float desiredEyeFromTop = targetSize * (1.0f - 0.60f);
+            float desiredHairTopFromTop = desiredEyeFromTop - eyeOffsetFromHairTop;
+
+            float minHairTopFromTop = targetSize * 0.07f;
+            if (desiredHairTopFromTop < minHairTopFromTop)
+            {
+                desiredHairTopFromTop = minHairTopFromTop;
+                desiredEyeFromTop = desiredHairTopFromTop + eyeOffsetFromHairTop;
+
+                // Keep eye height from bottom >= 56.5% (DoS minimum is 56%)
+                float eyeFromBottomRatio = (targetSize - desiredEyeFromTop) / targetSize;
+                if (eyeFromBottomRatio < 0.565f && eyeOffsetFromHairTop > 1f)
+                {
+                    float maxAllowedEyeFromTop = targetSize * (1.0f - 0.57f);
+                    float maxAllowedCrownToEye = maxAllowedEyeFromTop - minHairTopFromTop;
+                    float adjustFactor = maxAllowedCrownToEye / eyeOffsetFromHairTop;
+                    scale *= adjustFactor;
+                    scaledEyeLineY = eyeLineY * scale;
+                    desiredEyeFromTop = maxAllowedEyeFromTop;
+                }
+            }
+
+            int offsetX = (int)Math.Round((targetSize / 2.0f) - (faceCenterX * scale));
+            int offsetY = (int)Math.Round(desiredEyeFromTop - scaledEyeLineY);
 
             int scaledWidth = Math.Max(1, (int)Math.Round(whiteBgImage.Width * scale));
             int scaledHeight = Math.Max(1, (int)Math.Round(whiteBgImage.Height * scale));
@@ -169,9 +209,75 @@ namespace USVisaPhotoAutomator.Services
                 SaveUnder240KbJpeg(finalImage, outputPath);
         }
 
+        private static int DetectHairTopY(Bitmap mask, int faceLeft, int faceRight, int faceTop, int chinBottom, float faceCenterX)
+        {
+            int browToChin = Math.Max(20, chinBottom - faceTop);
+
+            // Anatomical guard rails relative to Dlib's brow-level face.Top:
+            // Even short hair/receding hairline extends at least ~0.35x browToChin above face.Top;
+            // Full hair extends up to ~0.95x browToChin above face.Top.
+            int defaultHairTop = Math.Max(0, faceTop - (int)Math.Round(browToChin * 0.45f));
+            int lowestAllowedY = Math.Max(0, faceTop - (int)Math.Round(browToChin * 0.95f));
+            int highestAllowedY = Math.Max(0, faceTop - (int)Math.Round(browToChin * 0.35f));
+
+            int faceWidth = Math.Max(20, faceRight - faceLeft);
+            int scanLeft = Math.Clamp((int)Math.Round(faceCenterX - faceWidth * 0.30f), 0, mask.Width - 1);
+            int scanRight = Math.Clamp((int)Math.Round(faceCenterX + faceWidth * 0.30f), scanLeft, mask.Width - 1);
+            int startY = Math.Clamp(faceTop, 0, mask.Height - 1);
+
+            var rect = new System.Drawing.Rectangle(0, 0, mask.Width, mask.Height);
+            var maskData = mask.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+
+            int detectedTop = defaultHairTop;
+            try
+            {
+                unsafe
+                {
+                    byte* basePtr = (byte*)maskData.Scan0;
+                    int stride = maskData.Stride;
+                    int emptyRowStreak = 0;
+                    int lastHairY = startY;
+
+                    for (int y = startY; y >= lowestAllowedY; y--)
+                    {
+                        byte* row = basePtr + (y * stride);
+                        bool hasHairPixel = false;
+
+                        for (int x = scanLeft; x <= scanRight; x++)
+                        {
+                            if (row[x * 3] >= 115)
+                            {
+                                hasHairPixel = true;
+                                break;
+                            }
+                        }
+
+                        if (hasHairPixel)
+                        {
+                            lastHairY = y;
+                            emptyRowStreak = 0;
+                        }
+                        else
+                        {
+                            emptyRowStreak++;
+                            if (emptyRowStreak >= 3)
+                                break;
+                        }
+                    }
+
+                    detectedTop = Math.Clamp(lastHairY, lowestAllowedY, highestAllowedY);
+                }
+            }
+            finally
+            {
+                mask.UnlockBits(maskData);
+            }
+
+            return detectedTop;
+        }
+
         private static Bitmap LoadOrientedBitmap(string inputPath)
         {
-            // Use FileStream to prevent Windows from locking the file
             using var fs = new FileStream(inputPath, FileMode.Open, FileAccess.Read);
             using var rawImg = System.Drawing.Image.FromStream(fs, useEmbeddedColorManagement: false, validateImageData: false);
             var bmp = new Bitmap(rawImg);
@@ -226,8 +332,6 @@ namespace USVisaPhotoAutomator.Services
             }
 
             var tensor = new DenseTensor<float>(new[] { 1, 3, dim, dim });
-            
-            // FIXED: Explicitly use System.Drawing.Rectangle
             var rect = new System.Drawing.Rectangle(0, 0, dim, dim);
             var bmpData = resized.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
 
@@ -284,8 +388,14 @@ namespace USVisaPhotoAutomator.Services
                         {
                             float val = outTensor[0, 0, y, x];
                             float norm = range > 1e-6f ? Math.Clamp((val - min) / range, 0f, 1f) : 0f;
-                            if (norm < 0.08f) norm = 0f;
-                            else if (norm > 0.92f) norm = 1f;
+
+                            // Suppress faint curtain/background haze while preserving soft hair boundary
+                            if (norm <= 0.12f)
+                                norm = 0f;
+                            else if (norm >= 0.88f)
+                                norm = 1f;
+                            else
+                                norm = (norm - 0.12f) / (0.88f - 0.12f);
 
                             byte m = (byte)Math.Round(norm * 255f);
                             row[x * 3] = m;
@@ -315,7 +425,6 @@ namespace USVisaPhotoAutomator.Services
             using (var g1 = Graphics.FromImage(srcCopy)) g1.DrawImage(image, 0, 0, width, height);
             using (var g2 = Graphics.FromImage(maskCopy)) g2.DrawImage(mask, 0, 0, width, height);
 
-            // FIXED: Explicitly use System.Drawing.Rectangle
             var rect = new System.Drawing.Rectangle(0, 0, width, height);
             var srcData = srcCopy.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
             var mskData = maskCopy.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
