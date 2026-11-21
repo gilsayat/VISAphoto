@@ -2,15 +2,15 @@ using DlibDotNet;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
 using SixLabors.ImageSharp.Formats.Jpeg;
 using SixLabors.ImageSharp.Formats.Png;
 using SixLabors.ImageSharp.Metadata;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Collections.Generic;
 
 namespace USVisaPhotoAutomator.Services
 {
@@ -27,11 +27,13 @@ namespace USVisaPhotoAutomator.Services
 
         public void ProcessVisaPhoto(string inputPath, string outputPath, string format, bool isPrintMode)
         {
-            if (!File.Exists(_onnxModelPath)) throw new FileNotFoundException("u2net.onnx model is missing in the Models folder.");
-            if (!File.Exists(_dlibModelPath)) throw new FileNotFoundException("shape_predictor_68_face_landmarks.dat is missing.");
+            if (!File.Exists(_onnxModelPath))
+                throw new FileNotFoundException("u2net.onnx model is missing in the Models folder.");
+            if (!File.Exists(_dlibModelPath))
+                throw new FileNotFoundException("shape_predictor_68_face_landmarks.dat is missing.");
 
             int targetSize = isPrintMode ? 1200 : 600;
-            float targetHeadRatio = 0.60f; 
+            float targetHeadRatio = 0.60f;
             float targetEyeRatioFromBottom = 0.62f;
 
             using var originalImage = Image.Load<Rgb24>(inputPath);
@@ -49,7 +51,8 @@ namespace USVisaPhotoAutomator.Services
             using (var dlibImg = Dlib.LoadImage<RgbPixel>(tempFile))
             {
                 var faces = detector.Operator(dlibImg);
-                File.Delete(tempFile);
+                if (File.Exists(tempFile))
+                    File.Delete(tempFile);
 
                 if (faces.Length == 0) throw new Exception("No face detected in the image.");
                 if (faces.Length > 1) throw new Exception("Multiple faces detected.");
@@ -64,7 +67,7 @@ namespace USVisaPhotoAutomator.Services
                 float leftEyeY = 0, rightEyeY = 0;
                 for (uint i = 36; i <= 41; i++) leftEyeY += shape.GetPart(i).Y;
                 for (uint i = 42; i <= 47; i++) rightEyeY += shape.GetPart(i).Y;
-                
+
                 eyeLineY = (int)((leftEyeY / 6.0f + rightEyeY / 6.0f) / 2.0f);
             }
 
@@ -80,20 +83,23 @@ namespace USVisaPhotoAutomator.Services
             int offsetX = targetCenterX - scaledFaceCenterX;
             int offsetY = targetEyeLineY - scaledEyeLineY;
 
-            using var finalImage = new Image<Rgb24>(targetSize, targetSize);
-            finalImage.Mutate(ctx => ctx.Fill(Color.White)); 
-            
-            whiteBgImage.Mutate(ctx => ctx.Resize(
-                (int)(whiteBgImage.Width * scale), 
-                (int)(whiteBgImage.Height * scale)));
+            int scaledWidth = Math.Max(1, (int)(whiteBgImage.Width * scale));
+            int scaledHeight = Math.Max(1, (int)(whiteBgImage.Height * scale));
 
-            finalImage.Mutate(ctx => ctx.DrawImage(whiteBgImage, new Point(offsetX, offsetY), 1f));
+            using var finalImage = new Image<Rgb24>(targetSize, targetSize);
+            finalImage.Mutate(ctx => ctx.BackgroundColor(Color.White));
+
+            whiteBgImage.Mutate(ctx => ctx.Resize(scaledWidth, scaledHeight));
+            finalImage.Mutate(ctx => ctx.DrawImage(
+                whiteBgImage,
+                new SixLabors.ImageSharp.Point(offsetX, offsetY),
+                1f));
 
             finalImage.Metadata.HorizontalResolution = 300;
             finalImage.Metadata.VerticalResolution = 300;
             finalImage.Metadata.ResolutionUnits = PixelResolutionUnit.PixelsPerInch;
 
-            if (format == "PNG")
+            if (string.Equals(format, "PNG", StringComparison.OrdinalIgnoreCase))
                 finalImage.Save(outputPath, new PngEncoder());
             else
                 finalImage.Save(outputPath, new JpegEncoder { Quality = 100 });
@@ -104,11 +110,14 @@ namespace USVisaPhotoAutomator.Services
             const int dim = 320;
             using var resized = sourceImage.Clone(x => x.Resize(dim, dim));
             var tensor = new DenseTensor<float>(new[] { 1, 3, dim, dim });
-            
-            resized.ProcessPixelRows(accessor => {
-                for (int y = 0; y < dim; y++) {
+
+            resized.ProcessPixelRows(accessor =>
+            {
+                for (int y = 0; y < dim; y++)
+                {
                     var row = accessor.GetRowSpan(y);
-                    for (int x = 0; x < dim; x++) {
+                    for (int x = 0; x < dim; x++)
+                    {
                         tensor[0, 0, y, x] = (row[x].R / 255f - 0.485f) / 0.229f;
                         tensor[0, 1, y, x] = (row[x].G / 255f - 0.456f) / 0.224f;
                         tensor[0, 2, y, x] = (row[x].B / 255f - 0.406f) / 0.225f;
@@ -119,23 +128,29 @@ namespace USVisaPhotoAutomator.Services
             var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("input.1", tensor) };
             using var session = new InferenceSession(_onnxModelPath);
             using var results = session.Run(inputs);
-            
+
             var outTensor = results.First().AsTensor<float>();
             var mask = new Image<L8>(dim, dim);
-            
+
             float max = float.MinValue, min = float.MaxValue;
-            for (int i = 0; i < dim * dim; i++) {
+            for (int i = 0; i < dim * dim; i++)
+            {
                 float val = outTensor.GetValue(i);
                 if (val > max) max = val;
                 if (val < min) min = val;
             }
 
-            mask.ProcessPixelRows(accessor => {
-                for (int y = 0; y < dim; y++) {
+            float range = max - min;
+
+            mask.ProcessPixelRows(accessor =>
+            {
+                for (int y = 0; y < dim; y++)
+                {
                     var row = accessor.GetRowSpan(y);
-                    for (int x = 0; x < dim; x++) {
+                    for (int x = 0; x < dim; x++)
+                    {
                         float val = outTensor[0, 0, y, x];
-                        float norm = (val - min) / (max - min);
+                        float norm = range > 1e-6f ? Math.Clamp((val - min) / range, 0f, 1f) : 0f;
                         row[x] = new L8((byte)(norm * 255));
                     }
                 }
@@ -147,15 +162,18 @@ namespace USVisaPhotoAutomator.Services
 
         private void ApplyWhiteBackground(Image<Rgb24> image, Image<L8> mask)
         {
-            image.ProcessPixelRows(mask, (imgAccessor, maskAccessor) => {
-                for (int y = 0; y < image.Height; y++) {
+            image.ProcessPixelRows(mask, (imgAccessor, maskAccessor) =>
+            {
+                for (int y = 0; y < image.Height; y++)
+                {
                     var imgRow = imgAccessor.GetRowSpan(y);
                     var maskRow = maskAccessor.GetRowSpan(y);
-                    for (int x = 0; x < image.Width; x++) {
+                    for (int x = 0; x < image.Width; x++)
+                    {
                         float alpha = maskRow[x].PackedValue / 255f;
-                        byte r = (byte)(imgRow[x].R * alpha + 255 * (1 - alpha));
-                        byte g = (byte)(imgRow[x].G * alpha + 255 * (1 - alpha));
-                        byte b = (byte)(imgRow[x].B * alpha + 255 * (1 - alpha));
+                        byte r = (byte)Math.Clamp(imgRow[x].R * alpha + 255f * (1f - alpha), 0f, 255f);
+                        byte g = (byte)Math.Clamp(imgRow[x].G * alpha + 255f * (1f - alpha), 0f, 255f);
+                        byte b = (byte)Math.Clamp(imgRow[x].B * alpha + 255f * (1f - alpha), 0f, 255f);
                         imgRow[x] = new Rgb24(r, g, b);
                     }
                 }
