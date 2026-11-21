@@ -152,7 +152,7 @@ namespace USVisaPhotoAutomator.Services
 
             using (Graphics g = Graphics.FromImage(finalImage))
             {
-                g.Clear(Color.White);
+                g.Clear(System.Drawing.Color.White);
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.SmoothingMode = SmoothingMode.HighQuality;
@@ -173,7 +173,7 @@ namespace USVisaPhotoAutomator.Services
         {
             // Use FileStream to prevent Windows from locking the file
             using var fs = new FileStream(inputPath, FileMode.Open, FileAccess.Read);
-            using var rawImg = Image.FromStream(fs, useEmbeddedColorManagement: false, validateImageData: false);
+            using var rawImg = System.Drawing.Image.FromStream(fs, useEmbeddedColorManagement: false, validateImageData: false);
             var bmp = new Bitmap(rawImg);
 
             const int orientationTagId = 0x0112;
@@ -226,7 +226,9 @@ namespace USVisaPhotoAutomator.Services
             }
 
             var tensor = new DenseTensor<float>(new[] { 1, 3, dim, dim });
-            var rect = new Rectangle(0, 0, dim, dim);
+            
+            // FIXED: Explicitly use System.Drawing.Rectangle
+            var rect = new System.Drawing.Rectangle(0, 0, dim, dim);
             var bmpData = resized.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
 
             try
@@ -313,7 +315,8 @@ namespace USVisaPhotoAutomator.Services
             using (var g1 = Graphics.FromImage(srcCopy)) g1.DrawImage(image, 0, 0, width, height);
             using (var g2 = Graphics.FromImage(maskCopy)) g2.DrawImage(mask, 0, 0, width, height);
 
-            var rect = new Rectangle(0, 0, width, height);
+            // FIXED: Explicitly use System.Drawing.Rectangle
+            var rect = new System.Drawing.Rectangle(0, 0, width, height);
             var srcData = srcCopy.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
             var mskData = maskCopy.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
             var dstData = result.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
