@@ -22,6 +22,21 @@ namespace USVisaPhotoAutomator
             InitializeComponent();
             string modelsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Models");
             _processor = new VisaPhotoProcessor(modelsDir);
+
+            // Pre-warm AI models on a background thread as soon as the app opens
+            Task.Run(() =>
+            {
+                try
+                {
+                    UpdateStatus("Warming up AI Models...", "#FFD700");
+                    _processor.PreWarmModels();
+                    UpdateStatus("Ready for input.", "#00FF7F");
+                }
+                catch (Exception ex)
+                {
+                    UpdateStatus($"Initialization Error: {ex.Message}", "#FF5C5C");
+                }
+            });
         }
 
         private void DropZone_DragEnter(object sender, DragEventArgs e)
@@ -83,7 +98,7 @@ namespace USVisaPhotoAutomator
         {
             try
             {
-                UpdateStatus("Processing AI Models...", "#FFD700");
+                UpdateStatus("Processing AI Image (Fast)...", "#FFD700");
                 PlaceholderUI.Visibility = Visibility.Collapsed;
                 PreviewImage.Visibility = Visibility.Collapsed;
                 BtnOpenFolder.Visibility = Visibility.Collapsed;
@@ -98,16 +113,12 @@ namespace USVisaPhotoAutomator
                 string outputPath = Path.Combine(outputDir, outputFilename);
                 _lastOutputPath = outputPath;
 
+                // Processing will be incredibly fast since models are pre-cached
                 await Task.Run(() => _processor.ProcessVisaPhoto(inputPath, outputPath, format, isPrintMode));
 
                 ShowPreview(outputPath);
                 UpdateStatus("Compliant & Saved!", "#00FF7F");
                 BtnOpenFolder.Visibility = Visibility.Visible;
-            }
-            catch (FileNotFoundException ex)
-            {
-                UpdateStatus($"Model Missing: {ex.Message}", "#FF5C5C");
-                PlaceholderUI.Visibility = Visibility.Visible;
             }
             catch (Exception ex)
             {
@@ -124,7 +135,7 @@ namespace USVisaPhotoAutomator
         {
             BitmapImage bitmap = new BitmapImage();
             bitmap.BeginInit();
-            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.CacheOption = BitmapCacheOption.OnLoad; // Releases file lock quickly
             bitmap.CreateOptions = BitmapCreateOptions.IgnoreImageCache;
             bitmap.UriSource = new Uri(path);
             bitmap.EndInit();
@@ -147,6 +158,12 @@ namespace USVisaPhotoAutomator
             {
                 Process.Start("explorer.exe", $"/select,\"{_lastOutputPath}\"");
             }
+        }
+
+        protected override void OnClosed(EventArgs e)
+        {
+            _processor.Dispose(); // Prevent unmanaged memory leaks on exit
+            base.OnClosed(e);
         }
     }
 }
