@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using USVisaPhotoAutomator.Services;
@@ -14,7 +15,7 @@ namespace USVisaPhotoAutomator
     public partial class MainWindow : Window
     {
         private readonly VisaPhotoProcessor _processor;
-        private string _lastOutputPath;
+        private string? _lastOutputPath;
 
         public MainWindow()
         {
@@ -42,8 +43,8 @@ namespace USVisaPhotoAutomator
             DropBorder.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#3F3F46"));
             if (e.Data.GetDataPresent(DataFormats.FileDrop))
             {
-                string[] files = (string[])e.Data.GetData(DataFormats.FileDrop);
-                string file = files.FirstOrDefault();
+                string[]? files = e.Data.GetData(DataFormats.FileDrop) as string[];
+                string? file = files?.FirstOrDefault();
                 await HandleImageSelectionAsync(file);
             }
         }
@@ -62,7 +63,7 @@ namespace USVisaPhotoAutomator
             }
         }
 
-        private async Task HandleImageSelectionAsync(string filePath)
+        private async Task HandleImageSelectionAsync(string? filePath)
         {
             if (string.IsNullOrEmpty(filePath) || !IsImageFile(filePath))
             {
@@ -74,7 +75,7 @@ namespace USVisaPhotoAutomator
 
         private bool IsImageFile(string path)
         {
-            string ext = Path.GetExtension(path).ToLower();
+            string ext = Path.GetExtension(path).ToLowerInvariant();
             return ext == ".jpg" || ext == ".jpeg" || ext == ".png";
         }
 
@@ -88,16 +89,18 @@ namespace USVisaPhotoAutomator
                 BtnOpenFolder.Visibility = Visibility.Collapsed;
                 ProcessingProgress.Visibility = Visibility.Visible;
 
-                string format = ((System.Windows.Controls.ComboBoxItem)CmbFormat.SelectedItem).Content.ToString();
+                string format = (CmbFormat.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "JPG";
                 bool isPrintMode = ChkPrintMode.IsChecked == true;
-                
-                string ext = format.ToLower();
+
+                string ext = format.ToLowerInvariant();
                 string outputFilename = $"{Path.GetFileNameWithoutExtension(inputPath)}_VisaCompliant.{ext}";
-                _lastOutputPath = Path.Combine(Path.GetDirectoryName(inputPath), outputFilename);
+                string outputDir = Path.GetDirectoryName(inputPath) ?? AppDomain.CurrentDomain.BaseDirectory;
+                string outputPath = Path.Combine(outputDir, outputFilename);
+                _lastOutputPath = outputPath;
 
-                await Task.Run(() => _processor.ProcessVisaPhoto(inputPath, _lastOutputPath, format, isPrintMode));
+                await Task.Run(() => _processor.ProcessVisaPhoto(inputPath, outputPath, format, isPrintMode));
 
-                ShowPreview(_lastOutputPath);
+                ShowPreview(outputPath);
                 UpdateStatus("Compliant & Saved!", "#00FF7F");
                 BtnOpenFolder.Visibility = Visibility.Visible;
             }
