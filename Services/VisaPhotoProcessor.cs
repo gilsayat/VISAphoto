@@ -88,7 +88,8 @@ namespace USVisaPhotoAutomator.Services
             string format,
             bool isPrintMode,
             EdgeFeatherMode edgeMode = EdgeFeatherMode.AutoSmart,
-            bool fixLighting = false)
+            bool fixLighting = false,
+            double manualTiltAngle = 0)
         {
             EnsureModelsLoaded();
 
@@ -101,37 +102,9 @@ namespace USVisaPhotoAutomator.Services
 
             Bitmap workingImage = ResizeIfLarger(originalImage, 2200);
 
-            // --- 1. Auto-Leveling (Head Tilt Correction) ---
-            string tiltTempFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".bmp");
-            workingImage.Save(tiltTempFile, ImageFormat.Bmp);
-            float tiltAngle = 0;
-
-            try
-            {
-                using var dlibImg = Dlib.LoadImage<RgbPixel>(tiltTempFile);
-                var faces = _detector!.Operator(dlibImg, 0);
-                if (faces.Length == 0) faces = _detector.Operator(dlibImg, 1);
-
-                if (faces.Length == 1)
-                {
-                    using var shape = _predictor!.Detect(dlibImg, faces[0]);
-                    float leftEyeY = 0, leftEyeX = 0, rightEyeY = 0, rightEyeX = 0;
-                    
-                    for (uint i = 36; i <= 41; i++) { leftEyeX += shape.GetPart(i).X; leftEyeY += shape.GetPart(i).Y; }
-                    for (uint i = 42; i <= 47; i++) { rightEyeX += shape.GetPart(i).X; rightEyeY += shape.GetPart(i).Y; }
-                    
-                    leftEyeX /= 6.0f; leftEyeY /= 6.0f;
-                    rightEyeX /= 6.0f; rightEyeY /= 6.0f;
-
-                    float dx = rightEyeX - leftEyeX;
-                    float dy = rightEyeY - leftEyeY;
-                    tiltAngle = (float)(Math.Atan2(dy, dx) * (180.0 / Math.PI));
-                }
-            }
-            finally { if (File.Exists(tiltTempFile)) File.Delete(tiltTempFile); }
-
+            // --- 1. Apply Manual Tilt Rotation ---
             Bitmap leveledImage = workingImage;
-            if (Math.Abs(tiltAngle) > 1.5f)
+            if (Math.Abs(manualTiltAngle) > 0.1)
             {
                 leveledImage = new Bitmap(workingImage.Width, workingImage.Height, PixelFormat.Format24bppRgb);
                 leveledImage.SetResolution(workingImage.HorizontalResolution, workingImage.VerticalResolution);
@@ -140,7 +113,7 @@ namespace USVisaPhotoAutomator.Services
                     g.Clear(System.Drawing.Color.White);
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                     g.TranslateTransform(workingImage.Width / 2f, workingImage.Height / 2f);
-                    g.RotateTransform(tiltAngle); 
+                    g.RotateTransform((float)manualTiltAngle);
                     g.TranslateTransform(-workingImage.Width / 2f, -workingImage.Height / 2f);
                     g.DrawImage(workingImage, new System.Drawing.Point(0, 0));
                 }
@@ -173,8 +146,8 @@ namespace USVisaPhotoAutomator.Services
                     // Open Mouth / Smile Check
                     float mouthHeight = shape.GetPart(66).Y - shape.GetPart(62).Y;
                     float mouthWidth = shape.GetPart(64).X - shape.GetPart(60).X;
-                    if (mouthWidth > 0 && (mouthHeight / mouthWidth) > 0.20f)
-                        throw new Exception("Subject's mouth appears open or smiling. US Visa rules require a strictly neutral expression.");
+                    if (mouthWidth > 0 && (mouthHeight / mouthWidth) > 0.18f)
+                        throw new Exception("Subject's mouth appears open or smiling. US Visa rules require a neutral expression.");
 
                     faceLeft = (int)face.Left;
                     faceRight = (int)face.Right;
