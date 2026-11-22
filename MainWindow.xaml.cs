@@ -88,12 +88,26 @@ namespace USVisaPhotoAutomator
             }
 
             _lastInputPath = filePath;
-            _lastOutputPath = null; // Reset previous output state
+            _lastOutputPath = null;
 
-            ShowPreview(filePath);
+            // Reset Tilt Slider and Preview Angle for the new image
+            TiltSlider.Value = 0;
+            if (PreviewRotation != null) PreviewRotation.Angle = 0;
+
+            ShowImageInPreview(filePath);
             BtnGenerate.IsEnabled = true;
             BtnOpenFolder.Visibility = Visibility.Collapsed;
-            UpdateStatus("Photo loaded. Ready to generate.", "#00FF7F");
+            UpdateStatus("Adjust tilt if needed, then click Generate.", "#00FF7F");
+        }
+
+        private void TiltSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            // Butter-smooth hardware rotation applied instantly to the UI
+            if (PreviewRotation != null)
+            {
+                PreviewRotation.Angle = e.NewValue;
+                if (LblTiltAngle != null) LblTiltAngle.Text = $"{e.NewValue:F1}°";
+            }
         }
 
         private async void BtnGenerate_Click(object sender, RoutedEventArgs e)
@@ -149,6 +163,7 @@ namespace USVisaPhotoAutomator
                 string format = (CmbFormat.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "JPG";
                 bool isPrintMode = ChkPrintMode.IsChecked == true;
                 bool fixLighting = ChkFixLighting.IsChecked == true;
+                double manualTilt = TiltSlider.Value;
                 EdgeFeatherMode edgeMode = GetSelectedEdgeMode();
 
                 string ext = format.ToLowerInvariant();
@@ -156,10 +171,14 @@ namespace USVisaPhotoAutomator
                 string outputDir = Path.GetDirectoryName(inputPath) ?? AppDomain.CurrentDomain.BaseDirectory;
                 string outputPath = Path.Combine(outputDir, outputFilename);
 
-                await Task.Run(() => _processor.ProcessVisaPhoto(inputPath, outputPath, format, isPrintMode, edgeMode, fixLighting));
+                await Task.Run(() => _processor.ProcessVisaPhoto(inputPath, outputPath, format, isPrintMode, edgeMode, fixLighting, manualTilt));
 
                 _lastOutputPath = outputPath;
-                ShowPreview(outputPath);
+                
+                // Reset the UI rotation because the C# image is now physically rotated
+                if (PreviewRotation != null) PreviewRotation.Angle = 0;
+                ShowImageInPreview(outputPath);
+                
                 UpdateStatus($"Compliant & Saved ({edgeMode})!", "#00FF7F");
                 BtnOpenFolder.Visibility = Visibility.Visible;
             }
@@ -174,7 +193,7 @@ namespace USVisaPhotoAutomator
             }
         }
 
-        private void ShowPreview(string path)
+        private void ShowImageInPreview(string path)
         {
             BitmapImage bitmap = new BitmapImage();
             bitmap.BeginInit();
