@@ -11,13 +11,9 @@ using System.Linq;
 
 namespace USVisaPhotoAutomator.Services
 {
-    public enum EdgeFeatherMode
-    {
-        AutoSmart,
-        Sharp,
-        Balanced,
-        Soft
-    }
+    public enum EdgeFeatherMode { AutoSmart, Sharp, Balanced, Soft }
+    public enum PrintLayout { Digital2x2, Print4x6, Print4x8, Print5x10 }
+    public enum BackgroundColorOption { White, OffWhite }
 
     public sealed class VisaPhotoProcessor : IDisposable
     {
@@ -38,27 +34,19 @@ namespace USVisaPhotoAutomator.Services
             _dlibModelPath = Path.Combine(modelsDirectory, "shape_predictor_68_face_landmarks.dat");
         }
 
-        public void PreWarmModels()
-        {
-            EnsureModelsLoaded();
-        }
+        public void PreWarmModels() { EnsureModelsLoaded(); }
 
         private void EnsureModelsLoaded()
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(VisaPhotoProcessor));
-
-            if (_session != null && _detector != null && _predictor != null)
-                return;
+            if (_session != null && _detector != null && _predictor != null) return;
 
             lock (_modelLock)
             {
-                if (_session != null && _detector != null && _predictor != null)
-                    return;
+                if (_session != null && _detector != null && _predictor != null) return;
 
-                if (!File.Exists(_onnxModelPath))
-                    throw new FileNotFoundException("Model Missing: 'u2net.onnx' not found in Models folder.");
-                if (!File.Exists(_dlibModelPath))
-                    throw new FileNotFoundException("Model Missing: 'shape_predictor_68_face_landmarks.dat' not found.");
+                if (!File.Exists(_onnxModelPath)) throw new FileNotFoundException("Model Missing: 'u2net.onnx' not found in Models folder.");
+                if (!File.Exists(_dlibModelPath)) throw new FileNotFoundException("Model Missing: 'shape_predictor_68_face_landmarks.dat' not found.");
 
                 if (_session == null)
                 {
@@ -76,25 +64,19 @@ namespace USVisaPhotoAutomator.Services
                         if (firstInput.Dimensions[3] > 0) _modelInputWidth = firstInput.Dimensions[3];
                     }
                 }
-
                 _detector ??= Dlib.GetFrontalFaceDetector();
                 _predictor ??= ShapePredictor.Deserialize(_dlibModelPath);
             }
         }
 
         public void ProcessVisaPhoto(
-            string inputPath,
-            string outputPath,
-            string format,
-            bool isPrintMode,
-            EdgeFeatherMode edgeMode = EdgeFeatherMode.AutoSmart,
-            bool fixLighting = false,
-            double manualTiltAngle = 0)
+            string inputPath, string outputPath, string format,
+            PrintLayout layout, int dpi, BackgroundColorOption bgColor,
+            EdgeFeatherMode edgeMode, bool fixLighting, double manualTiltAngle, double headZoomRatio)
         {
             EnsureModelsLoaded();
-
-            int targetSize = isPrintMode ? 1200 : 600;
-            float dpi = isPrintMode ? 600f : 300f;
+            int targetSize = 2 * dpi; 
+            byte bgTarget = bgColor == BackgroundColorOption.OffWhite ? (byte)240 : (byte)255;
 
             using Bitmap originalImage = LoadOrientedBitmap(inputPath);
             if (originalImage.Width < 200 || originalImage.Height < 200)
@@ -102,7 +84,7 @@ namespace USVisaPhotoAutomator.Services
 
             Bitmap workingImage = ResizeIfLarger(originalImage, 2200);
 
-            // --- 1. Apply Manual Tilt Rotation ---
+            // 1. Manual Tilt Rotation
             Bitmap leveledImage = workingImage;
             if (Math.Abs(manualTiltAngle) > 0.1)
             {
@@ -122,7 +104,7 @@ namespace USVisaPhotoAutomator.Services
 
             try
             {
-                // --- 2. Landmark Detection & Safety Checks ---
+                // 2. Landmark Detection & Safety
                 string detectTempFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".bmp");
                 leveledImage.Save(detectTempFile, ImageFormat.Bmp);
 
@@ -134,31 +116,23 @@ namespace USVisaPhotoAutomator.Services
                     using var dlibImg = Dlib.LoadImage<RgbPixel>(detectTempFile);
                     var faces = _detector!.Operator(dlibImg, 0);
                     if (faces.Length == 0) faces = _detector.Operator(dlibImg, 1);
-
-                    if (faces.Length == 0)
-                        throw new Exception("No face detected. Ensure lighting is even and the subject is looking forward.");
-                    if (faces.Length > 1)
-                        throw new Exception($"Multiple faces detected ({faces.Length}). Visa photos must contain exactly 1 person.");
+                    if (faces.Length == 0) throw new Exception("No face detected. Ensure lighting is even and subject looks forward.");
+                    if (faces.Length > 1) throw new Exception($"Multiple faces detected ({faces.Length}). Visa photos must contain exactly 1 person.");
 
                     var face = faces.OrderByDescending(r => r.Width * r.Height).First();
                     using var shape = _predictor!.Detect(dlibImg, face);
 
-                    // Open Mouth / Smile Check
                     float mouthHeight = shape.GetPart(66).Y - shape.GetPart(62).Y;
                     float mouthWidth = shape.GetPart(64).X - shape.GetPart(60).X;
                     if (mouthWidth > 0 && (mouthHeight / mouthWidth) > 0.18f)
                         throw new Exception("Subject's mouth appears open or smiling. US Visa rules require a neutral expression.");
 
-                    faceLeft = (int)face.Left;
-                    faceRight = (int)face.Right;
-                    browLineY = (int)face.Top;
-                    chinBottomY = Math.Max((int)shape.GetPart(8).Y,
-                                  Math.Max((int)shape.GetPart(7).Y, (int)shape.GetPart(9).Y));
+                    faceLeft = (int)face.Left; faceRight = (int)face.Right; browLineY = (int)face.Top;
+                    chinBottomY = Math.Max((int)shape.GetPart(8).Y, Math.Max((int)shape.GetPart(7).Y, (int)shape.GetPart(9).Y));
 
                     float leftEyeX = 0, leftEyeY = 0, rightEyeX = 0, rightEyeY = 0;
                     for (uint i = 36; i <= 41; i++) { leftEyeX += shape.GetPart(i).X; leftEyeY += shape.GetPart(i).Y; }
                     for (uint i = 42; i <= 47; i++) { rightEyeX += shape.GetPart(i).X; rightEyeY += shape.GetPart(i).Y; }
-
                     leftEyeX /= 6.0f; leftEyeY /= 6.0f; rightEyeX /= 6.0f; rightEyeY /= 6.0f;
 
                     eyeLineY = (leftEyeY + rightEyeY) / 2.0f;
@@ -167,12 +141,12 @@ namespace USVisaPhotoAutomator.Services
                 }
                 finally { if (File.Exists(detectTempFile)) File.Delete(detectTempFile); }
 
-                // --- 3. Face-Aware Lighting ---
+                // 3. Face-Aware Lighting
                 using Bitmap litImage = fixLighting
                     ? ApplyFaceAwareLightingBalance(leveledImage, faceLeft, faceRight, browLineY, chinBottomY)
                     : new Bitmap(leveledImage);
 
-                // --- 4. Crop ROI ---
+                // 4. Crop ROI
                 int browToChin = Math.Max(30, chinBottomY - browLineY);
                 int halfRoiWidth = (int)Math.Round(browToChin * 1.65f);
                 int roiLeft = Math.Clamp((int)Math.Round(faceCenterX) - halfRoiWidth, 0, litImage.Width - 1);
@@ -183,93 +157,99 @@ namespace USVisaPhotoAutomator.Services
                 var roiRect = new System.Drawing.Rectangle(roiLeft, roiTop, roiRight - roiLeft, roiBottom - roiTop);
                 using Bitmap roiImage = CropBitmap(litImage, roiRect);
 
-                int roiFaceLeft = faceLeft - roiLeft;
-                int roiFaceRight = faceRight - roiLeft;
-                int roiBrowLineY = browLineY - roiTop;
-                int roiChinBottomY = chinBottomY - roiTop;
-                float roiEyeLineY = eyeLineY - roiTop;
-                float roiFaceCenterX = faceCenterX - roiLeft;
+                int roiFaceLeft = faceLeft - roiLeft, roiFaceRight = faceRight - roiLeft, roiBrowLineY = browLineY - roiTop, roiChinBottomY = chinBottomY - roiTop;
+                float roiEyeLineY = eyeLineY - roiTop, roiFaceCenterX = faceCenterX - roiLeft;
 
-                // --- 5. Matting & Color Decontamination ---
+                // 5. Matting & Color Decontamination
                 using Bitmap coarseMask = GetCoarsePortraitMaskWithTTA(roiImage);
                 int roiHairTopY = DetectHairTopY(coarseMask, roiFaceLeft, roiFaceRight, roiBrowLineY, roiChinBottomY, roiFaceCenterX);
 
                 using Bitmap refinedAlpha = RefineAlphaWithLumaChromaGuidedFilter(roiImage, coarseMask, roiBrowLineY, edgeMode);
-                using Bitmap decontaminatedWhiteBg = CompositeWithColorDecontamination(roiImage, refinedAlpha);
+                using Bitmap decontaminatedBg = CompositeWithColorDecontamination(roiImage, refinedAlpha, bgTarget);
 
                 int rawHeadHeight = roiChinBottomY - roiHairTopY;
-                if (rawHeadHeight <= 20)
-                    throw new Exception("Could not measure valid head height from facial landmarks.");
+                if (rawHeadHeight <= 20) throw new Exception("Could not measure valid head height.");
 
-                // --- 6. U.S. Framing Solver ---
-                float targetHeadRatio = 0.56f;
-                float scale = (targetSize * targetHeadRatio) / rawHeadHeight;
-
-                if (scale > 4.5f)
-                    throw new Exception("Face is too small/far away to yield a sharp 2x2\" visa photo.");
+                // 6. Strict Zoom Framing (Head: 50%-69%, Eyes: 56%-69% from bottom)
+                float scale = (targetSize * (float)headZoomRatio) / rawHeadHeight;
+                if (scale > 4.5f) throw new Exception("Face is too small/far away to yield a sharp visa photo.");
 
                 float scaledHairTopY = roiHairTopY * scale;
                 float scaledEyeLineY = roiEyeLineY * scale;
                 float eyeOffsetFromHairTop = scaledEyeLineY - scaledHairTopY;
 
-                float desiredEyeFromTop = targetSize * (1.0f - 0.60f);
+                float desiredEyeFromTop = targetSize * (1.0f - 0.60f); // Default 60% from bottom
                 float desiredHairTopFromTop = desiredEyeFromTop - eyeOffsetFromHairTop;
-                float minHairTopFromTop = targetSize * 0.07f;
+                float minHairTopFromTop = targetSize * 0.05f; // Hard minimum headroom
 
                 if (desiredHairTopFromTop < minHairTopFromTop)
                 {
                     desiredHairTopFromTop = minHairTopFromTop;
                     desiredEyeFromTop = desiredHairTopFromTop + eyeOffsetFromHairTop;
-                    float eyeFromBottomRatio = (targetSize - desiredEyeFromTop) / targetSize;
-                    if (eyeFromBottomRatio < 0.565f && eyeOffsetFromHairTop > 1f)
-                    {
-                        float maxAllowedEyeFromTop = targetSize * (1.0f - 0.57f);
-                        float maxAllowedCrownToEye = maxAllowedEyeFromTop - minHairTopFromTop;
-                        float adjustFactor = maxAllowedCrownToEye / eyeOffsetFromHairTop;
-                        scale *= adjustFactor;
-                        scaledEyeLineY = roiEyeLineY * scale;
-                        desiredEyeFromTop = maxAllowedEyeFromTop;
-                    }
+                    float maxEyeFromTop = targetSize * (1.0f - 0.56f); // 56% from bottom bounds
+                    if (desiredEyeFromTop > maxEyeFromTop) desiredEyeFromTop = maxEyeFromTop;
                 }
 
                 int offsetX = (int)Math.Round((targetSize / 2.0f) - (roiFaceCenterX * scale));
                 int offsetY = (int)Math.Round(desiredEyeFromTop - scaledEyeLineY);
 
-                int scaledWidth = Math.Max(1, (int)Math.Round(decontaminatedWhiteBg.Width * scale));
-                int scaledHeight = Math.Max(1, (int)Math.Round(decontaminatedWhiteBg.Height * scale));
+                int scaledWidth = Math.Max(1, (int)Math.Round(decontaminatedBg.Width * scale));
+                int scaledHeight = Math.Max(1, (int)Math.Round(decontaminatedBg.Height * scale));
 
-                using Bitmap finalImage = new Bitmap(targetSize, targetSize, PixelFormat.Format24bppRgb);
-                finalImage.SetResolution(dpi, dpi);
-
-                using (Graphics g = Graphics.FromImage(finalImage))
+                using Bitmap base2x2 = new Bitmap(targetSize, targetSize, PixelFormat.Format24bppRgb);
+                base2x2.SetResolution(dpi, dpi);
+                using (Graphics g = Graphics.FromImage(base2x2))
                 {
-                    g.Clear(System.Drawing.Color.White);
+                    g.Clear(System.Drawing.Color.FromArgb(bgTarget, bgTarget, bgTarget));
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                     g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                     g.SmoothingMode = SmoothingMode.HighQuality;
-                    g.CompositingQuality = CompositingQuality.HighQuality;
-                    g.DrawImage(decontaminatedWhiteBg, offsetX, offsetY, scaledWidth, scaledHeight);
+                    g.DrawImage(decontaminatedBg, offsetX, offsetY, scaledWidth, scaledHeight);
+                    
+                    // Bleed-safe cut lines for print layouts
+                    if (layout != PrintLayout.Digital2x2)
+                        g.DrawRectangle(new Pen(System.Drawing.Color.Black, 2f), 4, 4, targetSize - 8, targetSize - 8);
                 }
 
-                // --- 7. Export ---
+                // 7. Render Layout Sheets
+                using Bitmap finalSheet = (layout == PrintLayout.Digital2x2) ? new Bitmap(base2x2) : GeneratePrintSheet(base2x2, layout, dpi, bgTarget);
+
+                // 8. Export
                 if (string.Equals(format, "PNG", StringComparison.OrdinalIgnoreCase))
-                    finalImage.Save(outputPath, ImageFormat.Png);
-                else if (isPrintMode)
-                    SaveJpegWithQuality(finalImage, outputPath, 98);
+                    finalSheet.Save(outputPath, ImageFormat.Png);
+                else if (layout != PrintLayout.Digital2x2)
+                    SaveJpegWithQuality(finalSheet, outputPath, 98); // High quality for prints
                 else
-                    SaveUnder240KbJpeg(finalImage, outputPath);
+                    SaveUnder240KbJpeg(finalSheet, outputPath); // Under 240KB for digital web upload
             }
-            finally
-            {
-                leveledImage.Dispose();
-            }
+            finally { leveledImage.Dispose(); }
+        }
+
+        private static Bitmap GeneratePrintSheet(Bitmap base2x2, PrintLayout layout, int dpi, byte bgTarget)
+        {
+            int targetSize = base2x2.Width;
+            int w = 4 * dpi, h = 6 * dpi;
+            if (layout == PrintLayout.Print4x8) h = 8 * dpi;
+            if (layout == PrintLayout.Print5x10) { w = 5 * dpi; h = 10 * dpi; }
+            
+            var sheet = new Bitmap(w, h, PixelFormat.Format24bppRgb);
+            sheet.SetResolution(dpi, dpi);
+            using Graphics gs = Graphics.FromImage(sheet);
+            gs.Clear(System.Drawing.Color.White);
+            
+            int rows = (layout == PrintLayout.Print4x6) ? 3 : 4;
+            int startX = (layout == PrintLayout.Print5x10) ? (int)(0.5f * dpi) : 0;
+            int startY = (layout == PrintLayout.Print5x10) ? (int)(1.0f * dpi) : 0;
+
+            for (int y = 0; y < rows; y++)
+                for (int x = 0; x < 2; x++)
+                    gs.DrawImageUnscaled(base2x2, startX + x * targetSize, startY + y * targetSize);
+            return sheet;
         }
 
         private static Bitmap ApplyFaceAwareLightingBalance(Bitmap source, int faceLeft, int faceRight, int browLineY, int chinBottomY)
         {
-            int w = source.Width;
-            int h = source.Height;
-
+            int w = source.Width, h = source.Height;
             int sampleLeft = Math.Clamp(faceLeft + (faceRight - faceLeft) / 6, 0, w - 1);
             int sampleRight = Math.Clamp(faceRight - (faceRight - faceLeft) / 6, sampleLeft, w - 1);
             int sampleTop = Math.Clamp(browLineY, 0, h - 1);
@@ -278,28 +258,21 @@ namespace USVisaPhotoAutomator.Services
             var rect = new System.Drawing.Rectangle(0, 0, w, h);
             using var srcCopy = new Bitmap(w, h, PixelFormat.Format24bppRgb);
             using (var g = Graphics.FromImage(srcCopy)) g.DrawImage(source, 0, 0, w, h);
-            
             var srcData = srcCopy.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-
-            double faceLumSum = 0;
-            int faceCount = 0;
+            double faceLumSum = 0; int faceCount = 0;
 
             try
             {
                 unsafe
                 {
-                    byte* basePtr = (byte*)srcData.Scan0;
-                    int stride = srcData.Stride;
+                    byte* basePtr = (byte*)srcData.Scan0; int stride = srcData.Stride;
                     for (int y = sampleTop; y <= sampleBottom; y++)
                     {
                         byte* row = basePtr + (y * stride);
                         for (int x = sampleLeft; x <= sampleRight; x++)
                         {
                             int idx = x * 3;
-                            float b = row[idx] / 255f;
-                            float gVal = row[idx + 1] / 255f;
-                            float r = row[idx + 2] / 255f;
-                            faceLumSum += 0.299f * r + 0.587f * gVal + 0.114f * b;
+                            faceLumSum += 0.299f * (row[idx + 2] / 255f) + 0.587f * (row[idx + 1] / 255f) + 0.114f * (row[idx] / 255f);
                             faceCount++;
                         }
                     }
@@ -308,18 +281,14 @@ namespace USVisaPhotoAutomator.Services
             finally { srcCopy.UnlockBits(srcData); }
 
             float avgFaceLum = faceCount > 0 ? (float)(faceLumSum / faceCount) : 0.56f;
-            float desiredLum = Math.Clamp(avgFaceLum, 0.25f, 0.72f);
-            float gamma = Math.Clamp((float)(Math.Log(0.56) / Math.Log(Math.Max(0.08, desiredLum))), 0.75f, 1.35f);
-
+            float gamma = Math.Clamp((float)(Math.Log(0.56) / Math.Log(Math.Max(0.08, Math.Clamp(avgFaceLum, 0.25f, 0.72f)))), 0.75f, 1.35f);
             if (Math.Abs(gamma - 1.0f) < 0.04f) return new Bitmap(source);
 
             byte[] lut = new byte[256];
             for (int i = 0; i < 256; i++)
             {
                 double norm = i / 255.0;
-                double corrected = Math.Pow(norm, gamma);
-                double shadowLift = 0.04 * (1.0 - norm) * (1.0 - norm);
-                lut[i] = (byte)Math.Clamp(Math.Round((corrected + shadowLift) * 255.0), 0, 255);
+                lut[i] = (byte)Math.Clamp(Math.Round((Math.Pow(norm, gamma) + 0.04 * (1.0 - norm) * (1.0 - norm)) * 255.0), 0, 255);
             }
 
             var output = new Bitmap(w, h, PixelFormat.Format24bppRgb);
@@ -330,27 +299,19 @@ namespace USVisaPhotoAutomator.Services
             {
                 unsafe
                 {
-                    byte* sBase = (byte*)readData.Scan0;
-                    byte* dBase = (byte*)outData.Scan0;
+                    byte* sBase = (byte*)readData.Scan0; byte* dBase = (byte*)outData.Scan0;
                     for (int y = 0; y < h; y++)
                     {
-                        byte* sRow = sBase + (y * readData.Stride);
-                        byte* dRow = dBase + (y * outData.Stride);
+                        byte* sRow = sBase + (y * readData.Stride); byte* dRow = dBase + (y * outData.Stride);
                         for (int x = 0; x < w; x++)
                         {
                             int idx = x * 3;
-                            dRow[idx] = lut[sRow[idx]];
-                            dRow[idx + 1] = lut[sRow[idx + 1]];
-                            dRow[idx + 2] = lut[sRow[idx + 2]];
+                            dRow[idx] = lut[sRow[idx]]; dRow[idx + 1] = lut[sRow[idx + 1]]; dRow[idx + 2] = lut[sRow[idx + 2]];
                         }
                     }
                 }
             }
-            finally
-            {
-                srcCopy.UnlockBits(readData);
-                output.UnlockBits(outData);
-            }
+            finally { srcCopy.UnlockBits(readData); output.UnlockBits(outData); }
             return output;
         }
 
@@ -366,89 +327,54 @@ namespace USVisaPhotoAutomator.Services
         private static int DetectHairTopY(Bitmap mask, int faceLeft, int faceRight, int faceTop, int chinBottom, float faceCenterX)
         {
             int browToChin = Math.Max(20, chinBottom - faceTop);
-            int defaultHairTop = Math.Max(0, faceTop - (int)Math.Round(browToChin * 0.45f));
             int lowestAllowedY = Math.Max(0, faceTop - (int)Math.Round(browToChin * 0.95f));
             int highestAllowedY = Math.Max(0, faceTop - (int)Math.Round(browToChin * 0.35f));
-
             int faceWidth = Math.Max(20, faceRight - faceLeft);
             int scanLeft = Math.Clamp((int)Math.Round(faceCenterX - faceWidth * 0.30f), 0, mask.Width - 1);
             int scanRight = Math.Clamp((int)Math.Round(faceCenterX + faceWidth * 0.30f), scanLeft, mask.Width - 1);
-            int startY = Math.Clamp(faceTop, 0, mask.Height - 1);
 
-            var rect = new System.Drawing.Rectangle(0, 0, mask.Width, mask.Height);
-            var maskData = mask.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-
-            int detectedTop = defaultHairTop;
+            var maskData = mask.LockBits(new System.Drawing.Rectangle(0, 0, mask.Width, mask.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            int lastHairY = Math.Clamp(faceTop, 0, mask.Height - 1);
             try
             {
                 unsafe
                 {
-                    byte* basePtr = (byte*)maskData.Scan0;
-                    int stride = maskData.Stride;
-                    int emptyRowStreak = 0;
-                    int lastHairY = startY;
-
-                    for (int y = startY; y >= lowestAllowedY; y--)
+                    byte* basePtr = (byte*)maskData.Scan0; int emptyRowStreak = 0;
+                    for (int y = lastHairY; y >= lowestAllowedY; y--)
                     {
-                        byte* row = basePtr + (y * stride);
+                        byte* row = basePtr + (y * maskData.Stride);
                         bool hasHairPixel = false;
-                        for (int x = scanLeft; x <= scanRight; x++)
-                        {
-                            if (row[x * 3] >= 115) { hasHairPixel = true; break; }
-                        }
-                        if (hasHairPixel)
-                        {
-                            lastHairY = y;
-                            emptyRowStreak = 0;
-                        }
-                        else
-                        {
-                            emptyRowStreak++;
-                            if (emptyRowStreak >= 3) break;
-                        }
+                        for (int x = scanLeft; x <= scanRight; x++) { if (row[x * 3] >= 115) { hasHairPixel = true; break; } }
+                        if (hasHairPixel) { lastHairY = y; emptyRowStreak = 0; }
+                        else { emptyRowStreak++; if (emptyRowStreak >= 3) break; }
                     }
-                    detectedTop = Math.Clamp(lastHairY, lowestAllowedY, highestAllowedY);
                 }
             }
             finally { mask.UnlockBits(maskData); }
-            return detectedTop;
+            return Math.Clamp(lastHairY, lowestAllowedY, highestAllowedY);
         }
 
         private Bitmap GetCoarsePortraitMaskWithTTA(Bitmap sourceImage)
         {
-            int w = _modelInputWidth;
-            int h = _modelInputHeight;
-
-            float[] maskNormal = RunSingleOnnxMask(sourceImage, w, h);
-
+            float[] maskNormal = RunSingleOnnxMask(sourceImage, _modelInputWidth, _modelInputHeight);
             using var flippedSource = new Bitmap(sourceImage);
             flippedSource.RotateFlip(RotateFlipType.RotateNoneFlipX);
-            float[] maskFlipped = RunSingleOnnxMask(flippedSource, w, h);
+            float[] maskFlipped = RunSingleOnnxMask(flippedSource, _modelInputWidth, _modelInputHeight);
 
-            using var smallMask = new Bitmap(w, h, PixelFormat.Format24bppRgb);
-            var rect = new System.Drawing.Rectangle(0, 0, w, h);
-            var maskData = smallMask.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
-
+            using var smallMask = new Bitmap(_modelInputWidth, _modelInputHeight, PixelFormat.Format24bppRgb);
+            var maskData = smallMask.LockBits(new System.Drawing.Rectangle(0, 0, _modelInputWidth, _modelInputHeight), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
             try
             {
                 unsafe
                 {
                     byte* basePtr = (byte*)maskData.Scan0;
-                    int stride = maskData.Stride;
-                    for (int y = 0; y < h; y++)
+                    for (int y = 0; y < _modelInputHeight; y++)
                     {
-                        byte* row = basePtr + (y * stride);
-                        int rowIdx = y * w;
-                        for (int x = 0; x < w; x++)
+                        byte* row = basePtr + (y * maskData.Stride); int rowIdx = y * _modelInputWidth;
+                        for (int x = 0; x < _modelInputWidth; x++)
                         {
-                            float p1 = maskNormal[rowIdx + x];
-                            float p2 = maskFlipped[rowIdx + (w - 1 - x)];
-                            float avg = 0.5f * (p1 + p2);
-
-                            byte m = (byte)Math.Round(Math.Clamp(avg, 0f, 1f) * 255f);
-                            row[x * 3] = m;
-                            row[x * 3 + 1] = m;
-                            row[x * 3 + 2] = m;
+                            byte m = (byte)Math.Round(Math.Clamp(0.5f * (maskNormal[rowIdx + x] + maskFlipped[rowIdx + (_modelInputWidth - 1 - x)]), 0f, 1f) * 255f);
+                            row[x * 3] = m; row[x * 3 + 1] = m; row[x * 3 + 2] = m;
                         }
                     }
                 }
@@ -467,61 +393,41 @@ namespace USVisaPhotoAutomator.Services
         private float[] RunSingleOnnxMask(Bitmap sourceImage, int dimW, int dimH)
         {
             using var resized = new Bitmap(dimW, dimH, PixelFormat.Format24bppRgb);
-            using (var g = Graphics.FromImage(resized))
-            {
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                g.DrawImage(sourceImage, 0, 0, dimW, dimH);
-            }
-
+            using (var g = Graphics.FromImage(resized)) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.DrawImage(sourceImage, 0, 0, dimW, dimH); }
             var tensor = new DenseTensor<float>(new[] { 1, 3, dimH, dimW });
-            var rect = new System.Drawing.Rectangle(0, 0, dimW, dimH);
-            var bmpData = resized.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-
+            var bmpData = resized.LockBits(new System.Drawing.Rectangle(0, 0, dimW, dimH), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
             try
             {
                 unsafe
                 {
                     byte* basePtr = (byte*)bmpData.Scan0;
-                    int stride = bmpData.Stride;
                     for (int y = 0; y < dimH; y++)
                     {
-                        byte* row = basePtr + (y * stride);
+                        byte* row = basePtr + (y * bmpData.Stride);
                         for (int x = 0; x < dimW; x++)
                         {
-                            byte b = row[x * 3];
-                            byte gVal = row[x * 3 + 1];
-                            byte r = row[x * 3 + 2];
-                            tensor[0, 0, y, x] = (r / 255f - 0.485f) / 0.229f;
-                            tensor[0, 1, y, x] = (gVal / 255f - 0.456f) / 0.224f;
-                            tensor[0, 2, y, x] = (b / 255f - 0.406f) / 0.225f;
+                            tensor[0, 0, y, x] = (row[x * 3 + 2] / 255f - 0.485f) / 0.229f;
+                            tensor[0, 1, y, x] = (row[x * 3 + 1] / 255f - 0.456f) / 0.224f;
+                            tensor[0, 2, y, x] = (row[x * 3] / 255f - 0.406f) / 0.225f;
                         }
                     }
                 }
             }
             finally { resized.UnlockBits(bmpData); }
 
-            string inputName = _session!.InputMetadata.Keys.FirstOrDefault() ?? "input.1";
-            var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(inputName, tensor) };
-
-            using var results = _session.Run(inputs);
+            using var results = _session.Run(new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(_session!.InputMetadata.Keys.FirstOrDefault() ?? "input.1", tensor) });
             var outTensor = results.First().AsTensor<float>();
 
             float min = float.MaxValue, max = float.MinValue;
-            foreach (float val in outTensor)
-            {
-                if (val < min) min = val;
-                if (val > max) max = val;
-            }
+            foreach (float val in outTensor) { if (val < min) min = val; if (val > max) max = val; }
             float range = max - min;
-
             float[] normOut = new float[dimW * dimH];
             for (int y = 0; y < dimH; y++)
             {
                 int rowIdx = y * dimW;
                 for (int x = 0; x < dimW; x++)
                 {
-                    float val = outTensor[0, 0, y, x];
-                    normOut[rowIdx + x] = range > 1e-6f ? Math.Clamp((val - min) / range, 0f, 1f) : 0f;
+                    normOut[rowIdx + x] = range > 1e-6f ? Math.Clamp((outTensor[0, 0, y, x] - min) / range, 0f, 1f) : 0f;
                 }
             }
             return normOut;
@@ -529,39 +435,25 @@ namespace USVisaPhotoAutomator.Services
 
         private static Bitmap RefineAlphaWithLumaChromaGuidedFilter(Bitmap guideImage, Bitmap coarseMask, int browLineY, EdgeFeatherMode mode)
         {
-            int w = guideImage.Width;
-            int h = guideImage.Height;
-            int count = w * h;
-
+            int w = guideImage.Width, h = guideImage.Height, count = w * h;
             int radius = mode switch { EdgeFeatherMode.Sharp => 3, EdgeFeatherMode.Soft => 7, _ => 5 };
             float eps = mode switch { EdgeFeatherMode.Sharp => 0.0008f, EdgeFeatherMode.Soft => 0.0035f, _ => 0.0016f };
 
-            float[] g1 = new float[count];
-            float[] g2 = new float[count];
-            float[] p = new float[count];
-
-            var rect = new System.Drawing.Rectangle(0, 0, w, h);
-            var guideData = guideImage.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-            var maskData = coarseMask.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-
+            float[] g1 = new float[count], g2 = new float[count], p = new float[count];
+            var guideData = guideImage.LockBits(new System.Drawing.Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            var maskData = coarseMask.LockBits(new System.Drawing.Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
             try
             {
                 unsafe
                 {
-                    byte* gBase = (byte*)guideData.Scan0;
-                    byte* mBase = (byte*)maskData.Scan0;
+                    byte* gBase = (byte*)guideData.Scan0, mBase = (byte*)maskData.Scan0;
                     for (int y = 0; y < h; y++)
                     {
-                        byte* gRow = gBase + (y * guideData.Stride);
-                        byte* mRow = mBase + (y * maskData.Stride);
-                        int rowOffset = y * w;
+                        byte* gRow = gBase + (y * guideData.Stride), mRow = mBase + (y * maskData.Stride); int rowOffset = y * w;
                         for (int x = 0; x < w; x++)
                         {
                             int idx = x * 3;
-                            float b = gRow[idx] / 255f;
-                            float g = gRow[idx + 1] / 255f;
-                            float r = gRow[idx + 2] / 255f;
-
+                            float b = gRow[idx] / 255f, g = gRow[idx + 1] / 255f, r = gRow[idx + 2] / 255f;
                             g1[rowOffset + x] = 0.299f * r + 0.587f * g + 0.114f * b;
                             g2[rowOffset + x] = (r - b) * 0.5f + 0.5f;
                             p[rowOffset + x] = mRow[idx] / 255f;
@@ -569,11 +461,7 @@ namespace USVisaPhotoAutomator.Services
                     }
                 }
             }
-            finally
-            {
-                guideImage.UnlockBits(guideData);
-                coarseMask.UnlockBits(maskData);
-            }
+            finally { guideImage.UnlockBits(guideData); coarseMask.UnlockBits(maskData); }
 
             float[] g1g1 = new float[count], g2g2 = new float[count], g1g2 = new float[count], g1p = new float[count], g2p = new float[count];
             for (int i = 0; i < count; i++)
@@ -585,22 +473,15 @@ namespace USVisaPhotoAutomator.Services
             float[] meanG1 = BoxFilter(g1, w, h, radius), meanG2 = BoxFilter(g2, w, h, radius), meanP = BoxFilter(p, w, h, radius);
             float[] meanG1G1 = BoxFilter(g1g1, w, h, radius), meanG2G2 = BoxFilter(g2g2, w, h, radius), meanG1G2 = BoxFilter(g1g2, w, h, radius);
             float[] meanG1P = BoxFilter(g1p, w, h, radius), meanG2P = BoxFilter(g2p, w, h, radius);
-
             float[] a1 = new float[count], a2 = new float[count], bCoef = new float[count];
 
             for (int i = 0; i < count; i++)
             {
-                float var1 = meanG1G1[i] - meanG1[i] * meanG1[i] + eps;
-                float var2 = meanG2G2[i] - meanG2[i] * meanG2[i] + eps;
+                float var1 = meanG1G1[i] - meanG1[i] * meanG1[i] + eps, var2 = meanG2G2[i] - meanG2[i] * meanG2[i] + eps;
                 float cov12 = meanG1G2[i] - meanG1[i] * meanG2[i];
-                float cov1p = meanG1P[i] - meanG1[i] * meanP[i];
-                float cov2p = meanG2P[i] - meanG2[i] * meanP[i];
-
-                float det = var1 * var2 - cov12 * cov12;
-                if (Math.Abs(det) < 1e-10f) det = 1e-10f;
-
-                a1[i] = (var2 * cov1p - cov12 * cov2p) / det;
-                a2[i] = (var1 * cov2p - cov12 * cov1p) / det;
+                float det = var1 * var2 - cov12 * cov12; if (Math.Abs(det) < 1e-10f) det = 1e-10f;
+                a1[i] = (var2 * (meanG1P[i] - meanG1[i] * meanP[i]) - cov12 * (meanG2P[i] - meanG2[i] * meanP[i])) / det;
+                a2[i] = (var1 * (meanG2P[i] - meanG2[i] * meanP[i]) - cov12 * (meanG1P[i] - meanG1[i] * meanP[i])) / det;
                 bCoef[i] = meanP[i] - a1[i] * meanG1[i] - a2[i] * meanG2[i];
             }
 
@@ -614,34 +495,23 @@ namespace USVisaPhotoAutomator.Services
                 default: hairLow = 0.15f; hairHigh = 0.85f; earLow = 0.25f; earHigh = 0.75f; break;
             }
 
-            float[] rawAlpha = new float[count];
-            float transitionBand = Math.Max(24f, h * 0.05f);
-
+            float[] rawAlpha = new float[count]; float transitionBand = Math.Max(24f, h * 0.05f);
             for (int y = 0; y < h; y++)
             {
-                int rowOffset = y * w;
-                float blend = Math.Clamp((y - (browLineY - transitionBand * 0.5f)) / transitionBand, 0f, 1f);
-                float low = hairLow + (earLow - hairLow) * blend;
-                float high = hairHigh + (earHigh - hairHigh) * blend;
-
+                int rowOffset = y * w; float blend = Math.Clamp((y - (browLineY - transitionBand * 0.5f)) / transitionBand, 0f, 1f);
+                float low = hairLow + (earLow - hairLow) * blend, high = hairHigh + (earHigh - hairHigh) * blend;
                 for (int x = 0; x < w; x++)
                 {
-                    int i = rowOffset + x;
-                    float q = Math.Clamp(meanA1[i] * g1[i] + meanA2[i] * g2[i] + meanB[i], 0f, 1f);
+                    int i = rowOffset + x; float q = Math.Clamp(meanA1[i] * g1[i] + meanA2[i] * g2[i] + meanB[i], 0f, 1f);
                     if (q <= low) rawAlpha[i] = 0f;
                     else if (q >= high) rawAlpha[i] = 1f;
-                    else
-                    {
-                        float t = (q - low) / (high - low);
-                        rawAlpha[i] = t * t * (3f - 2f * t);
-                    }
+                    else { float t = (q - low) / (high - low); rawAlpha[i] = t * t * (3f - 2f * t); }
                 }
             }
 
             float[] smoothAlpha = BoxFilter(rawAlpha, w, h, 1);
             var refined = new Bitmap(w, h, PixelFormat.Format24bppRgb);
-            var outData = refined.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
-
+            var outData = refined.LockBits(new System.Drawing.Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
             try
             {
                 unsafe
@@ -649,15 +519,11 @@ namespace USVisaPhotoAutomator.Services
                     byte* oBase = (byte*)outData.Scan0;
                     for (int y = 0; y < h; y++)
                     {
-                        byte* oRow = oBase + (y * outData.Stride);
-                        int rowOffset = y * w;
+                        byte* oRow = oBase + (y * outData.Stride); int rowOffset = y * w;
                         for (int x = 0; x < w; x++)
                         {
                             byte m = (byte)Math.Round(Math.Clamp(smoothAlpha[rowOffset + x], 0f, 1f) * 255f);
-                            int idx = x * 3;
-                            oRow[idx] = m;
-                            oRow[idx + 1] = m;
-                            oRow[idx + 2] = m;
+                            int idx = x * 3; oRow[idx] = m; oRow[idx + 1] = m; oRow[idx + 2] = m;
                         }
                     }
                 }
@@ -666,16 +532,12 @@ namespace USVisaPhotoAutomator.Services
             return refined;
         }
 
-        private static Bitmap CompositeWithColorDecontamination(Bitmap image, Bitmap alphaMask)
+        private static Bitmap CompositeWithColorDecontamination(Bitmap image, Bitmap alphaMask, byte bgTarget)
         {
-            int w = image.Width;
-            int h = image.Height;
-            int count = w * h;
-
+            int w = image.Width, h = image.Height, count = w * h;
             float[] srcB = new float[count], srcG = new float[count], srcR = new float[count], alpha = new float[count];
             float[] bgB = new float[count], bgG = new float[count], bgR = new float[count], bgW = new float[count];
-            double globalBgB = 0, globalBgG = 0, globalBgR = 0;
-            int globalBgCount = 0;
+            double globalBgB = 0, globalBgG = 0, globalBgR = 0; int globalBgCount = 0;
 
             var rect = new System.Drawing.Rectangle(0, 0, w, h);
             var srcData = image.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
@@ -685,22 +547,14 @@ namespace USVisaPhotoAutomator.Services
             {
                 unsafe
                 {
-                    byte* sBase = (byte*)srcData.Scan0;
-                    byte* mBase = (byte*)mskData.Scan0;
+                    byte* sBase = (byte*)srcData.Scan0, mBase = (byte*)mskData.Scan0;
                     for (int y = 0; y < h; y++)
                     {
-                        byte* sRow = sBase + (y * srcData.Stride);
-                        byte* mRow = mBase + (y * mskData.Stride);
-                        int rowOffset = y * w;
+                        byte* sRow = sBase + (y * srcData.Stride), mRow = mBase + (y * mskData.Stride); int rowOffset = y * w;
                         for (int x = 0; x < w; x++)
                         {
-                            int i = rowOffset + x;
-                            int idx = x * 3;
-                            float b = sRow[idx];
-                            float g = sRow[idx + 1];
-                            float r = sRow[idx + 2];
-                            float a = mRow[idx] / 255f;
-
+                            int i = rowOffset + x; int idx = x * 3;
+                            float b = sRow[idx], g = sRow[idx + 1], r = sRow[idx + 2], a = mRow[idx] / 255f;
                             srcB[i] = b; srcG[i] = g; srcR[i] = r; alpha[i] = a;
 
                             if (a <= 0.04f)
@@ -712,24 +566,17 @@ namespace USVisaPhotoAutomator.Services
                     }
                 }
             }
-            finally
-            {
-                image.UnlockBits(srcData);
-                alphaMask.UnlockBits(mskData);
-            }
+            finally { image.UnlockBits(srcData); alphaMask.UnlockBits(mskData); }
 
             float fallbackB = globalBgCount > 0 ? (float)(globalBgB / globalBgCount) : 200f;
             float fallbackG = globalBgCount > 0 ? (float)(globalBgG / globalBgCount) : 200f;
             float fallbackR = globalBgCount > 0 ? (float)(globalBgR / globalBgCount) : 200f;
 
-            float[] sumBgB = BoxFilter(bgB, w, h, 28);
-            float[] sumBgG = BoxFilter(bgG, w, h, 28);
-            float[] sumBgR = BoxFilter(bgR, w, h, 28);
-            float[] sumBgW = BoxFilter(bgW, w, h, 28);
+            float[] sumBgB = BoxFilter(bgB, w, h, 28), sumBgG = BoxFilter(bgG, w, h, 28);
+            float[] sumBgR = BoxFilter(bgR, w, h, 28), sumBgW = BoxFilter(bgW, w, h, 28);
 
             var result = new Bitmap(w, h, PixelFormat.Format24bppRgb);
             var dstData = result.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
-
             try
             {
                 unsafe
@@ -737,21 +584,13 @@ namespace USVisaPhotoAutomator.Services
                     byte* dBase = (byte*)dstData.Scan0;
                     for (int y = 0; y < h; y++)
                     {
-                        byte* dRow = dBase + (y * dstData.Stride);
-                        int rowOffset = y * w;
+                        byte* dRow = dBase + (y * dstData.Stride); int rowOffset = y * w;
                         for (int x = 0; x < w; x++)
                         {
-                            int i = rowOffset + x;
-                            int idx = x * 3;
-                            float a = alpha[i];
+                            int i = rowOffset + x; int idx = x * 3; float a = alpha[i];
 
-                            if (a <= 0.005f) { dRow[idx] = 255; dRow[idx + 1] = 255; dRow[idx + 2] = 255; }
-                            else if (a >= 0.995f)
-                            {
-                                dRow[idx] = (byte)Math.Round(srcB[i]);
-                                dRow[idx + 1] = (byte)Math.Round(srcG[i]);
-                                dRow[idx + 2] = (byte)Math.Round(srcR[i]);
-                            }
+                            if (a <= 0.005f) { dRow[idx] = bgTarget; dRow[idx + 1] = bgTarget; dRow[idx + 2] = bgTarget; }
+                            else if (a >= 0.995f) { dRow[idx] = (byte)Math.Round(srcB[i]); dRow[idx + 1] = (byte)Math.Round(srcG[i]); dRow[idx + 2] = (byte)Math.Round(srcR[i]); }
                             else
                             {
                                 float weight = sumBgW[i];
@@ -759,13 +598,9 @@ namespace USVisaPhotoAutomator.Services
                                 float localG = weight > 1e-4f ? (sumBgG[i] / weight) : fallbackG;
                                 float localR = weight > 1e-4f ? (sumBgR[i] / weight) : fallbackR;
                                 float oneMinusA = 1f - a;
-                                float outB = srcB[i] + oneMinusA * (255f - localB);
-                                float outG = srcG[i] + oneMinusA * (255f - localG);
-                                float outR = srcR[i] + oneMinusA * (255f - localR);
-
-                                dRow[idx] = (byte)Math.Clamp(Math.Round(outB), 0, 255);
-                                dRow[idx + 1] = (byte)Math.Clamp(Math.Round(outG), 0, 255);
-                                dRow[idx + 2] = (byte)Math.Clamp(Math.Round(outR), 0, 255);
+                                dRow[idx] = (byte)Math.Clamp(Math.Round(srcB[i] + oneMinusA * (bgTarget - localB)), 0, 255);
+                                dRow[idx + 1] = (byte)Math.Clamp(Math.Round(srcG[i] + oneMinusA * (bgTarget - localG)), 0, 255);
+                                dRow[idx + 2] = (byte)Math.Clamp(Math.Round(srcR[i] + oneMinusA * (bgTarget - localR)), 0, 255);
                             }
                         }
                     }
@@ -777,12 +612,10 @@ namespace USVisaPhotoAutomator.Services
 
         private static float[] BoxFilter(float[] src, int w, int h, int r)
         {
-            int stride = w + 1;
-            double[] integral = new double[stride * (h + 1)];
+            int stride = w + 1; double[] integral = new double[stride * (h + 1)];
             for (int y = 0; y < h; y++)
             {
-                double rowSum = 0.0;
-                int srcRow = y * w, prevIntRow = y * stride, currIntRow = (y + 1) * stride;
+                double rowSum = 0.0; int srcRow = y * w, prevIntRow = y * stride, currIntRow = (y + 1) * stride;
                 for (int x = 0; x < w; x++)
                 {
                     rowSum += src[srcRow + x];
@@ -798,8 +631,7 @@ namespace USVisaPhotoAutomator.Services
                 {
                     int x0 = Math.Max(0, x - r), x1 = Math.Min(w - 1, x + r);
                     double sum = integral[r1 + x1 + 1] - integral[r0 + x1 + 1] - integral[r1 + x0] + integral[r0 + x0];
-                    int area = (x1 - x0 + 1) * (y1 - y0 + 1);
-                    dst[dstRow + x] = (float)(sum / area);
+                    dst[dstRow + x] = (float)(sum / ((x1 - x0 + 1) * (y1 - y0 + 1)));
                 }
             }
             return dst;
@@ -810,10 +642,9 @@ namespace USVisaPhotoAutomator.Services
             using var fs = new FileStream(inputPath, FileMode.Open, FileAccess.Read);
             using var rawImg = System.Drawing.Image.FromStream(fs, useEmbeddedColorManagement: false, validateImageData: false);
             var bmp = new Bitmap(rawImg);
-            const int orientationTagId = 0x0112;
-            if (Array.IndexOf(rawImg.PropertyIdList, orientationTagId) >= 0)
+            if (Array.IndexOf(rawImg.PropertyIdList, 0x0112) >= 0)
             {
-                var prop = rawImg.GetPropertyItem(orientationTagId);
+                var prop = rawImg.GetPropertyItem(0x0112);
                 if (prop?.Value != null && prop.Value.Length >= 2)
                 {
                     switch (BitConverter.ToUInt16(prop.Value, 0))
@@ -873,12 +704,7 @@ namespace USVisaPhotoAutomator.Services
         public void Dispose()
         {
             if (_isDisposed) return;
-            lock (_modelLock)
-            {
-                _session?.Dispose(); _detector?.Dispose(); _predictor?.Dispose();
-                _session = null; _detector = null; _predictor = null;
-                _isDisposed = true;
-            }
+            lock (_modelLock) { _session?.Dispose(); _detector?.Dispose(); _predictor?.Dispose(); _session = null; _detector = null; _predictor = null; _isDisposed = true; }
         }
     }
 }
