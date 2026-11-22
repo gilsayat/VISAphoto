@@ -90,23 +90,43 @@ namespace USVisaPhotoAutomator
             _lastInputPath = filePath;
             _lastOutputPath = null;
 
-            // Reset Tilt Slider and Preview Angle for the new image
             TiltSlider.Value = 0;
+            ZoomSlider.Value = 56;
             if (PreviewRotation != null) PreviewRotation.Angle = 0;
+            if (PreviewScale != null) { PreviewScale.ScaleX = 1.0; PreviewScale.ScaleY = 1.0; }
 
             ShowImageInPreview(filePath);
             BtnGenerate.IsEnabled = true;
             BtnOpenFolder.Visibility = Visibility.Collapsed;
-            UpdateStatus("Adjust tilt if needed, then click Generate.", "#00FF7F");
+            AlignmentGrid.Visibility = ChkGrid.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+            UpdateStatus("Adjust tilt & zoom, then click Generate.", "#00FF7F");
+        }
+
+        private void ChkGrid_Click(object sender, RoutedEventArgs e)
+        {
+            if (AlignmentGrid != null && !string.IsNullOrEmpty(_lastInputPath))
+            {
+                AlignmentGrid.Visibility = ChkGrid.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+            }
         }
 
         private void TiltSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
-            // Butter-smooth hardware rotation applied instantly to the UI
             if (PreviewRotation != null)
             {
                 PreviewRotation.Angle = e.NewValue;
                 if (LblTiltAngle != null) LblTiltAngle.Text = $"{e.NewValue:F1}°";
+            }
+        }
+        
+        private void ZoomSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (PreviewScale != null)
+            {
+                double scale = e.NewValue / 56.0;
+                PreviewScale.ScaleX = scale;
+                PreviewScale.ScaleY = scale;
+                if (LblZoomValue != null) LblZoomValue.Text = $"{e.NewValue:F0}%";
             }
         }
 
@@ -119,34 +139,10 @@ namespace USVisaPhotoAutomator
             BtnGenerate.IsEnabled = true;
         }
 
-        private async void Settings_Changed(object sender, RoutedEventArgs e)
-        {
-            // Only auto-reprocess if an output was ALREADY generated (so you can tweak settings live)
-            if (!IsLoaded || _isProcessing || string.IsNullOrEmpty(_lastOutputPath)) return;
-            if (!string.IsNullOrEmpty(_lastInputPath) && File.Exists(_lastInputPath))
-            {
-                BtnGenerate.IsEnabled = false;
-                await ProcessFileAsync(_lastInputPath);
-                BtnGenerate.IsEnabled = true;
-            }
-        }
-
         private bool IsImageFile(string path)
         {
             string ext = Path.GetExtension(path).ToLowerInvariant();
             return ext == ".jpg" || ext == ".jpeg" || ext == ".png";
-        }
-
-        private EdgeFeatherMode GetSelectedEdgeMode()
-        {
-            string? tag = (CmbEdgeMode?.SelectedItem as ComboBoxItem)?.Tag?.ToString();
-            return tag switch
-            {
-                "Sharp" => EdgeFeatherMode.Sharp,
-                "Balanced" => EdgeFeatherMode.Balanced,
-                "Soft" => EdgeFeatherMode.Soft,
-                _ => EdgeFeatherMode.AutoSmart
-            };
         }
 
         private async Task ProcessFileAsync(string inputPath)
@@ -156,30 +152,53 @@ namespace USVisaPhotoAutomator
 
             try
             {
-                UpdateStatus("Processing AI Image...", "#FFD700");
+                UpdateStatus("Processing AI Image & Rendering Sheet...", "#FFD700");
                 ProcessingProgress.Visibility = Visibility.Visible;
                 BtnOpenFolder.Visibility = Visibility.Collapsed;
+                AlignmentGrid.Visibility = Visibility.Collapsed; // Hide grid during render
 
                 string format = (CmbFormat.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "JPG";
-                bool isPrintMode = ChkPrintMode.IsChecked == true;
                 bool fixLighting = ChkFixLighting.IsChecked == true;
                 double manualTilt = TiltSlider.Value;
-                EdgeFeatherMode edgeMode = GetSelectedEdgeMode();
+                double headZoomRatio = ZoomSlider.Value / 100.0;
+                
+                string layoutTag = (CmbLayout.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "Digital2x2";
+                PrintLayout layout = layoutTag switch {
+                    "Print4x6" => PrintLayout.Print4x6,
+                    "Print4x8" => PrintLayout.Print4x8,
+                    "Print5x10" => PrintLayout.Print5x10,
+                    _ => PrintLayout.Digital2x2
+                };
+                
+                int dpi = (CmbDPI.SelectedIndex == 1) ? 600 : 300;
+                
+                string bgTag = (CmbBgColor.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "White";
+                BackgroundColorOption bgColor = bgTag == "Off-White" ? BackgroundColorOption.OffWhite : BackgroundColorOption.White;
+
+                string edgeTag = (CmbEdgeMode.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "AutoSmart";
+                EdgeFeatherMode edgeMode = edgeTag switch
+                {
+                    "Sharp" => EdgeFeatherMode.Sharp,
+                    "Balanced" => EdgeFeatherMode.Balanced,
+                    "Soft" => EdgeFeatherMode.Soft,
+                    _ => EdgeFeatherMode.AutoSmart
+                };
 
                 string ext = format.ToLowerInvariant();
                 string outputFilename = $"{Path.GetFileNameWithoutExtension(inputPath)}_VisaCompliant.{ext}";
                 string outputDir = Path.GetDirectoryName(inputPath) ?? AppDomain.CurrentDomain.BaseDirectory;
                 string outputPath = Path.Combine(outputDir, outputFilename);
 
-                await Task.Run(() => _processor.ProcessVisaPhoto(inputPath, outputPath, format, isPrintMode, edgeMode, fixLighting, manualTilt));
+                await Task.Run(() => _processor.ProcessVisaPhoto(
+                    inputPath, outputPath, format, layout, dpi, bgColor, edgeMode, fixLighting, manualTilt, headZoomRatio));
 
                 _lastOutputPath = outputPath;
                 
-                // Reset the UI rotation because the C# image is now physically rotated
                 if (PreviewRotation != null) PreviewRotation.Angle = 0;
+                if (PreviewScale != null) { PreviewScale.ScaleX = 1.0; PreviewScale.ScaleY = 1.0; }
                 ShowImageInPreview(outputPath);
                 
-                UpdateStatus($"Compliant & Saved ({edgeMode})!", "#00FF7F");
+                UpdateStatus($"Saved {layout} @ {dpi} DPI ({edgeMode})!", "#00FF7F");
                 BtnOpenFolder.Visibility = Visibility.Visible;
             }
             catch (Exception ex)
