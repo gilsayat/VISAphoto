@@ -163,9 +163,10 @@ namespace USVisaPhotoAutomator.Services
 
             using var ms = new MemoryStream();
             if (previewMode) {
-                var encoder = new PngBitmapEncoder();
-                encoder.Frames.Add(BitmapFrame.Create(GetBitmapSource(canvas)));
-                encoder.Save(ms);
+                // BUG FIX: We now use the native System.Drawing PNG encoder directly to preserve transparency.
+                // This eliminates the need for WPF namespaces (BitmapSource, PngBitmapEncoder) 
+                // and the risky GDI+ Handle Interop.
+                canvas.Save(ms, ImageFormat.Png); 
             } else {
                 var ep = new EncoderParameters(1);
                 ep.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 98L); 
@@ -173,17 +174,6 @@ namespace USVisaPhotoAutomator.Services
                 canvas.Save(ms, codec, ep);
             }
             return ms.ToArray();
-        }
-
-        [System.Runtime.InteropServices.DllImport("gdi32.dll")]
-        public static extern bool DeleteObject(IntPtr hObject);
-        private static BitmapSource GetBitmapSource(Bitmap bmp)
-        {
-            IntPtr hBitmap = bmp.GetHbitmap();
-            try {
-                return System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
-                    hBitmap, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
-            } finally { DeleteObject(hBitmap); }
         }
 
         public void GenerateHighResPrint(ProcessingRequest req)
