@@ -17,6 +17,7 @@ namespace USVisaPhotoAutomator
         private readonly VisaPhotoProcessor _processor;
         private string? _lastInputPath;
         private string? _lastOutputPath;
+        private byte[]? _thumbCache;
 
         public MainWindow()
         {
@@ -44,20 +45,35 @@ namespace USVisaPhotoAutomator
             if (openFileDialog.ShowDialog() == true) HandleImageSelection(openFileDialog.FileName);
         }
 
-        private void HandleImageSelection(string? filePath)
+        private async void HandleImageSelection(string? filePath)
         {
             if (string.IsNullOrEmpty(filePath)) return;
             _lastInputPath = filePath; _lastOutputPath = null;
             
-            // Reset sliders
             ZoomSlider.Value = 0; TiltSlider.Value = 0; PanXSlider.Value = 0; PanYSlider.Value = 0;
-            BrightSlider.Value = 0; TempSlider.Value = 0; ChokeSlider.Value = 0;
+            BrightSlider.Value = 0; RecovSlider.Value = 0; TempSlider.Value = 0; ChokeSlider.Value = 0;
 
-            ShowImageInPreview(filePath);
-            BtnGenerate.IsEnabled = true;
-            BtnOpenFolder.Visibility = Visibility.Collapsed;
-            VisaHUD.Visibility = Visibility.Visible;
-            UpdateStatus("Adjust framing in the viewport, then Generate.", "#00FF7F");
+            BtnGenerate.IsEnabled = false;
+            UpdateStatus("Processing Dlib Anchor...", "#FFD700");
+            ProcessingProgress.Visibility = Visibility.Visible;
+
+            try 
+            {
+                // Run instant Dlib proxy anchor check to ensure UI starts perfectly centered
+                _thumbCache = await Task.Run(() => _processor.GenerateOrientedThumbnail(filePath, 600));
+                ShowImageFromBytes(_thumbCache);
+                
+                BtnGenerate.IsEnabled = true;
+                BtnOpenFolder.Visibility = Visibility.Collapsed;
+                VisaHUD.Visibility = Visibility.Visible;
+                UpdateStatus("Adjust framing in the viewport, then Generate.", "#00FF7F");
+            } 
+            catch (Exception ex) 
+            {
+                UpdateStatus($"Auto-Anchor failed: {ex.Message} Switching to Manual.", "#FFD700");
+                BtnGenerate.IsEnabled = true;
+            }
+            finally { ProcessingProgress.Visibility = Visibility.Collapsed; }
         }
 
         private void Slider_UpdateUI(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -74,7 +90,14 @@ namespace USVisaPhotoAutomator
                 LblZ.Text = $"{ZoomSlider.Value:F0}"; LblT.Text = $"{TiltSlider.Value:F1}°";
                 LblX.Text = $"{PanXSlider.Value:F0}"; LblY.Text = $"{PanYSlider.Value:F0}";
                 LblB.Text = $"{BrightSlider.Value:F0}"; LblC.Text = $"{TempSlider.Value:F0}";
-                LblE.Text = $"{ChokeSlider.Value:F0}";
+                LblE.Text = $"{ChokeSlider.Value:F0}"; LblR.Text = $"{RecovSlider.Value:F0}";
+            }
+
+            // Live Color Grading on thumbnail buffer
+            if (_thumbCache != null && (Math.Abs(BrightSlider.Value) > 0.1 || Math.Abs(TempSlider.Value) > 0.1 || Math.Abs(RecovSlider.Value) > 0.1))
+            {
+                byte[] colored = _processor.ApplyLiveColorGrading(_thumbCache, BrightSlider.Value, TempSlider.Value, RecovSlider.Value);
+                ShowImageFromBytes(colored);
             }
         }
 
@@ -103,12 +126,16 @@ namespace USVisaPhotoAutomator
                     Layout = layout, BgColor = bgColor, EdgeMode = edgeMode,
                     Tilt = TiltSlider.Value, ZoomOffset = ZoomSlider.Value,
                     PanX = PanXSlider.Value, PanY = PanYSlider.Value,
-                    Brightness = BrightSlider.Value, ColorTemp = TempSlider.Value, EdgeChoke = (int)ChokeSlider.Value
+                    Brightness = BrightSlider.Value, ColorTemp = TempSlider.Value, 
+                    HighlightRecovery = RecovSlider.Value, EdgeChoke = (int)ChokeSlider.Value
                 };
 
                 await Task.Run(() => _processor.ProcessVisaPhoto(req));
                 _lastOutputPath = outputPath;
-                ShowImageInPreview(outputPath);
+                
+                // Show output
+                ShowImageFromBytes(File.ReadAllBytes(outputPath));
+                
                 UpdateStatus($"Successfully generated studio file!", "#00FF7F");
                 BtnOpenFolder.Visibility = Visibility.Visible;
             }
@@ -116,13 +143,23 @@ namespace USVisaPhotoAutomator
             finally { ProcessingProgress.Visibility = Visibility.Collapsed; BtnGenerate.IsEnabled = true; }
         }
 
-        private void ShowImageInPreview(string path)
+        private void ShowImageFromBytes(byte[] bytes)
         {
-            BitmapImage bitmap = new BitmapImage();
-            bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad;
-            bitmap.CreateOptions = BitmapCreateOptions.IgnoreImageCache;
-            bitmap.UriSource = new Uri(path); bitmap.EndInit();
-            PlaceholderUI.Visibility = Visibility.Collapsed; PreviewImage.Source = bitmap; PreviewImage.Visibility = Visibility.Visible;
+            try {
+                BitmapImage bitmap = new BitmapImage();
+                using (var stream = new MemoryStream(bytes)) {
+                    bitmap.BeginInit();
+                    bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                    bitmap.StreamSource = stream;
+                    bitmap.EndInit();
+                }
+                bitmap.Freeze();
+                Dispatcher.Invoke(() => {
+                    PlaceholderUI.Visibility = Visibility.Collapsed; 
+                    PreviewImage.Source = bitmap; 
+                    PreviewImage.Visibility = Visibility.Visible;
+                });
+            } catch {}
         }
 
         private void UpdateStatus(string message, string hexColor)
