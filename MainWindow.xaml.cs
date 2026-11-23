@@ -4,7 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using USVisaPhotoAutomator.Services;
@@ -22,23 +22,34 @@ namespace USVisaPhotoAutomator
         private bool _renderPending = false;
         private bool _isEngineReady = false;
 
+        // Smart Canvas Variables
+        private bool _isDragging = false;
+        private Point _dragStartPos;
+        private double _panX = 0, _panY = 0;
+        private double _zoomScale = 0; 
+        private double _tiltAngle = 0;
+        private bool _isShiftDown = false;
+
         public MainWindow()
         {
             InitializeComponent();
             string modelsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Models");
             _processor = new VisaPhotoProcessor(modelsDir);
-            Task.Run(() => { try { _processor.PreWarmModels(); UpdateStatus("Engine ready.", "#00FF7F"); } catch {} });
+            Task.Run(() => { try { _processor.PreWarmModels(); UpdateStatus("Engine loaded and ready.", "#00FF7F"); } catch {} });
         }
 
-        private void DropZone_DragEnter(object sender, DragEventArgs e) { if (e.Data.GetDataPresent(DataFormats.FileDrop)) { e.Effects = DragDropEffects.Copy; DropBorder.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#1E90FF")); } }
-        private void DropZone_DragLeave(object sender, DragEventArgs e) { DropBorder.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#333338")); }
+        private void Window_PreviewKeyDown(object sender, KeyEventArgs e) { if (e.Key == Key.LeftShift || e.Key == Key.RightShift) _isShiftDown = true; }
+        private void Window_PreviewKeyUp(object sender, KeyEventArgs e) { if (e.Key == Key.LeftShift || e.Key == Key.RightShift) _isShiftDown = false; }
+
+        private void DropZone_DragEnter(object sender, DragEventArgs e) { if (e.Data.GetDataPresent(DataFormats.FileDrop)) { e.Effects = DragDropEffects.Copy; CanvasBorder.BorderBrush = new SolidColorBrush(Colors.DodgerBlue); } }
+        private void DropZone_DragLeave(object sender, DragEventArgs e) { CanvasBorder.BorderBrush = new SolidColorBrush(Colors.Transparent); }
         
         private void DropZone_Drop(object sender, DragEventArgs e)
         {
-            DropBorder.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#333338"));
+            CanvasBorder.BorderBrush = new SolidColorBrush(Colors.Transparent);
             if (e.Data.GetDataPresent(DataFormats.FileDrop))
             {
-                var file = (e.Data.GetData(DataFormats.FileDrop) as string[])?.FirstOrDefault();
+                var file = ((string[])e.Data.GetData(DataFormats.FileDrop)).FirstOrDefault();
                 HandleImageSelection(file);
             }
         }
@@ -55,12 +66,10 @@ namespace USVisaPhotoAutomator
             _lastInputPath = filePath; _lastOutputPath = null;
             _isEngineReady = false;
             
-            // Reset Sliders silently
-            ZoomSlider.Value = 0; TiltSlider.Value = 0; PanXSlider.Value = 0; PanYSlider.Value = 0;
-            BrightSlider.Value = 0; RecovSlider.Value = 0; TempSlider.Value = 0; ChokeSlider.Value = 0;
+            ResetManualOffsets();
 
             BtnGenerate.IsEnabled = false;
-            UpdateStatus("Extracting Master Alpha Mask & Landmarks...", "#FFD700");
+            UpdateStatus("AI Processing: Landmark Mapping & Matting...", "#FFD700");
             ProcessingProgress.Visibility = Visibility.Visible;
             PlaceholderUI.Visibility = Visibility.Collapsed;
             PreviewImage.Visibility = Visibility.Collapsed;
@@ -69,10 +78,12 @@ namespace USVisaPhotoAutomator
             {
                 await Task.Run(() => _processor.InitializeMasterFile(filePath));
                 _isEngineReady = true;
-                VisaHUD.Visibility = Visibility.Visible;
+                
+                CanvasBorder.Background = (CmbBgColor.SelectedIndex == 0) ? new SolidColorBrush(Colors.White) : new SolidColorBrush(Color.FromRgb(242, 242, 242));
+                VisaBlueprint.Visibility = Visibility.Visible;
                 BtnGenerate.IsEnabled = true;
                 BtnOpenFolder.Visibility = Visibility.Collapsed;
-                UpdateStatus("WYSIWYG Mode Active. Adjust sliders.", "#00FF7F");
+                UpdateStatus("Ready. Drag to Pan, Scroll to Zoom.", "#00FF7F");
                 
                 TriggerLiveRender();
             } 
@@ -84,23 +95,87 @@ namespace USVisaPhotoAutomator
             finally { ProcessingProgress.Visibility = Visibility.Collapsed; }
         }
 
-        private void Slider_UpdateUI(object sender, RoutedPropertyChangedEventArgs<double> e)
+        // ==========================================
+        // SMART CANVAS INTERACTIONS
+        // ==========================================
+        private void Canvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
-            if (LblZ != null) {
-                LblZ.Text = $"{ZoomSlider.Value:F0}"; LblT.Text = $"{TiltSlider.Value:F1}°";
-                LblX.Text = $"{PanXSlider.Value:F0}"; LblY.Text = $"{PanYSlider.Value:F0}";
-                LblB.Text = $"{BrightSlider.Value:F0}"; LblC.Text = $"{TempSlider.Value:F0}";
-                LblE.Text = $"{ChokeSlider.Value:F0}"; LblR.Text = $"{RecovSlider.Value:F0}";
+            if (!_isEngineReady) return;
+            _isDragging = true;
+            _dragStartPos = e.GetPosition(CanvasBorder);
+            CanvasBorder.CaptureMouse();
+        }
+
+        private void Canvas_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            _isDragging = false;
+            CanvasBorder.ReleaseMouseCapture();
+            TriggerLiveRender(); 
+        }
+
+        private void Canvas_MouseMove(object sender, MouseEventArgs e)
+        {
+            if (!_isDragging || !_isEngineReady) return;
+
+            Point currentPos = e.GetPosition(CanvasBorder);
+            // Convert 600px UI movement to absolute percentages for the C# engine
+            double deltaX = (currentPos.X - _dragStartPos.X) / 600.0 * 100.0;
+            double deltaY = (currentPos.Y - _dragStartPos.Y) / 600.0 * 100.0;
+            
+            _panX += deltaX;
+            _panY += deltaY;
+            
+            _dragStartPos = currentPos;
+            TriggerLiveRender();
+        }
+
+        private void Canvas_MouseWheel(object sender, MouseWheelEventArgs e)
+        {
+            if (!_isEngineReady) return;
+
+            if (_isShiftDown) {
+                // Tilt
+                double tiltDelta = e.Delta > 0 ? 0.5 : -0.5;
+                _tiltAngle = Math.Clamp(_tiltAngle + tiltDelta, -25, 25);
+            } else {
+                // Zoom anchored towards cursor
+                double zoomDelta = e.Delta > 0 ? 2.0 : -2.0; 
+                _zoomScale = Math.Clamp(_zoomScale + zoomDelta, -20, 40);
+                
+                // Cursor anchor math: push image away from center relative to cursor position
+                Point cursor = e.GetPosition(CanvasBorder);
+                double cursorNormX = (cursor.X - 300.0) / 600.0; 
+                double cursorNormY = (cursor.Y - 300.0) / 600.0;
+                
+                if (zoomDelta > 0) { _panX -= cursorNormX * 2.0; _panY -= cursorNormY * 2.0; }
+                else { _panX += cursorNormX * 2.0; _panY += cursorNormY * 2.0; }
             }
             TriggerLiveRender();
         }
 
-        private void Cmb_SelectionChanged(object sender, SelectionChangedEventArgs e) { TriggerLiveRender(); }
+        private void Canvas_MouseLeave(object sender, MouseEventArgs e) { if (_isDragging) Canvas_MouseLeftButtonUp(sender, null!); }
 
+        private void ResetManualOffsets()
+        {
+            _panX = 0; _panY = 0; _zoomScale = 0; _tiltAngle = 0;
+            if (_isEngineReady) TriggerLiveRender();
+        }
+
+        private void BtnSnapAuto_Click(object sender, RoutedEventArgs e) { ResetManualOffsets(); }
+
+        private void Setting_Changed(object sender, RoutedEventArgs e) 
+        {
+            if (CanvasBorder != null && CmbBgColor != null)
+                CanvasBorder.Background = (CmbBgColor.SelectedIndex == 0) ? new SolidColorBrush(Colors.White) : new SolidColorBrush(Color.FromRgb(242, 242, 242));
+            TriggerLiveRender(); 
+        }
+
+        // ==========================================
+        // RENDERING
+        // ==========================================
         private async void TriggerLiveRender()
         {
             if (!_isEngineReady) return;
-            
             _renderPending = true;
             if (_isRendering) return;
 
@@ -111,33 +186,24 @@ namespace USVisaPhotoAutomator
                 {
                     _renderPending = false;
                     var req = GetCurrentRequest();
-                    
-                    // Render exactly what the final output will be (but at a fast preview resolution of 600x600)
                     byte[] frame = await Task.Run(() => _processor.RenderFrame(req, previewMode: true));
                     ShowImageFromBytes(frame);
                 }
             }
-            finally
-            {
-                _isRendering = false;
-            }
+            finally { _isRendering = false; }
         }
 
         private ProcessingRequest GetCurrentRequest()
         {
-            string layoutTag = (CmbLayout.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "Digital2x2";
-            PrintLayout layout = layoutTag switch { "Print4x6" => PrintLayout.Print4x6, "Print4x8" => PrintLayout.Print4x8, "Print5x10" => PrintLayout.Print5x10, _ => PrintLayout.Digital2x2 };
-            string bgTag = (CmbBgColor.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "Pure White";
-            BackgroundColorOption bgColor = bgTag == "Off-White" ? BackgroundColorOption.OffWhite : BackgroundColorOption.White;
-            string edgeTag = (CmbEdgeMode.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "AutoSmart";
-            EdgeFeatherMode edgeMode = edgeTag switch { "Sharp" => EdgeFeatherMode.Sharp, "Soft" => EdgeFeatherMode.Soft, _ => EdgeFeatherMode.AutoSmart };
+            PrintLayout layout = CmbLayout.SelectedIndex switch { 0 => PrintLayout.Print4x6, 1 => PrintLayout.Print4x8, 2 => PrintLayout.Print5x10, _ => PrintLayout.Digital2x2 };
+            BackgroundColorOption bg = CmbBgColor.SelectedIndex == 0 ? BackgroundColorOption.White : BackgroundColorOption.OffWhite;
+            EdgeFeatherMode edge = ChkSoftEdge.IsChecked == true ? EdgeFeatherMode.Soft : EdgeFeatherMode.Sharp;
 
             return new ProcessingRequest {
-                Layout = layout, BgColor = bgColor, EdgeMode = edgeMode,
-                Tilt = TiltSlider.Value, ZoomOffset = ZoomSlider.Value,
-                PanX = PanXSlider.Value, PanY = PanYSlider.Value,
-                Brightness = BrightSlider.Value, ColorTemp = TempSlider.Value, 
-                HighlightRecovery = RecovSlider.Value, EdgeChoke = (int)ChokeSlider.Value
+                Layout = layout, BgColor = bg, EdgeMode = edge,
+                Tilt = _tiltAngle, ZoomOffset = _zoomScale,
+                PanX = _panX, PanY = _panY,
+                AutoFixLighting = ChkAutoLighting.IsChecked == true
             };
         }
 
@@ -148,23 +214,22 @@ namespace USVisaPhotoAutomator
             
             try
             {
-                UpdateStatus("Compiling 600 DPI Print Sheet...", "#FFD700");
+                UpdateStatus("Compiling 600 DPI Master Print Sheet...", "#0066FF");
                 ProcessingProgress.Visibility = Visibility.Visible;
 
                 var req = GetCurrentRequest();
-                string ext = (req.Layout == PrintLayout.Digital2x2) ? "jpg" : "jpg"; // Use jpg for prints
+                string ext = "jpg";
                 string outputFilename = $"{Path.GetFileNameWithoutExtension(_lastInputPath)}_VisaReady.{ext}";
                 string outputPath = Path.Combine(Path.GetDirectoryName(_lastInputPath) ?? AppDomain.CurrentDomain.BaseDirectory, outputFilename);
                 req.OutputPath = outputPath;
 
-                // Render at full 600 DPI (1200x1200px master)
                 await Task.Run(() => _processor.GenerateHighResPrint(req));
                 _lastOutputPath = outputPath;
                 
-                UpdateStatus($"Successfully generated print file!", "#00FF7F");
+                UpdateStatus($"Generation Complete! Ready for Lab Printer.", "#00AA00");
                 BtnOpenFolder.Visibility = Visibility.Visible;
             }
-            catch (Exception ex) { UpdateStatus($"Export Error: {ex.Message}", "#FF5C5C"); }
+            catch (Exception ex) { UpdateStatus($"Error: {ex.Message}", "#FF0000"); }
             finally { ProcessingProgress.Visibility = Visibility.Collapsed; BtnGenerate.IsEnabled = true; }
         }
 
@@ -179,10 +244,7 @@ namespace USVisaPhotoAutomator
                     bitmap.EndInit();
                 }
                 bitmap.Freeze();
-                Dispatcher.Invoke(() => {
-                    PreviewImage.Source = bitmap; 
-                    PreviewImage.Visibility = Visibility.Visible;
-                });
+                Dispatcher.Invoke(() => { PreviewImage.Source = bitmap; PreviewImage.Visibility = Visibility.Visible; });
             } catch {}
         }
 
@@ -190,6 +252,7 @@ namespace USVisaPhotoAutomator
         {
             Dispatcher.Invoke(() => { LblStatus.Text = message; LblStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hexColor)); });
         }
+        
         private void BtnOpenFolder_Click(object sender, RoutedEventArgs e)
         {
             if (!string.IsNullOrEmpty(_lastOutputPath) && File.Exists(_lastOutputPath)) Process.Start("explorer.exe", $"/select,\"{_lastOutputPath}\"");
