@@ -118,7 +118,6 @@ namespace USVisaPhotoAutomator
             if (!_isDragging || !_isEngineReady) return;
 
             Point currentPos = e.GetPosition(CanvasBorder);
-            // Convert 600px UI movement to absolute percentages for the C# engine
             double deltaX = (currentPos.X - _dragStartPos.X) / 600.0 * 100.0;
             double deltaY = (currentPos.Y - _dragStartPos.Y) / 600.0 * 100.0;
             
@@ -142,7 +141,6 @@ namespace USVisaPhotoAutomator
                 double zoomDelta = e.Delta > 0 ? 2.0 : -2.0; 
                 _zoomScale = Math.Clamp(_zoomScale + zoomDelta, -20, 40);
                 
-                // Cursor anchor math: push image away from center relative to cursor position
                 Point cursor = e.GetPosition(CanvasBorder);
                 double cursorNormX = (cursor.X - 300.0) / 600.0; 
                 double cursorNormY = (cursor.Y - 300.0) / 600.0;
