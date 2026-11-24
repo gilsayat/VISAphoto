@@ -153,19 +153,11 @@ namespace USVisaPhotoAutomator.Services
             g.DrawImage(subjectLayer, 0, 0);
             
             g.ResetTransform();
-            if (!previewMode)
-            {
-                int fadeH = (int)(targetSize * 0.05f); // 5% fade at bottom
-                System.Drawing.Rectangle rect = new System.Drawing.Rectangle(0, targetSize - fadeH, targetSize, fadeH);
-                using LinearGradientBrush lgb = new LinearGradientBrush(rect, System.Drawing.Color.Transparent, System.Drawing.Color.FromArgb(bgTarget, bgTarget, bgTarget), 90f);
-                g.FillRectangle(lgb, rect);
-            }
+            
+            // BUG FIX: Removed the automatic 5% shoulder vignette fade.
 
             using var ms = new MemoryStream();
             if (previewMode) {
-                // BUG FIX: We now use the native System.Drawing PNG encoder directly to preserve transparency.
-                // This eliminates the need for WPF namespaces (BitmapSource, PngBitmapEncoder) 
-                // and the risky GDI+ Handle Interop.
                 canvas.Save(ms, ImageFormat.Png); 
             } else {
                 var ep = new EncoderParameters(1);
