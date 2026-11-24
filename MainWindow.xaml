@@ -34,28 +34,34 @@
                     <!-- Real-Time Cutout Image -->
                     <Image x:Name="PreviewImage" Stretch="Uniform" Visibility="Collapsed" IsHitTestVisible="False" />
                     
-                    <!-- Exact U.S. Visa Composition Template Overlay (image_5da102.png spec) -->
-                    <Canvas x:Name="VisaBlueprint" IsHitTestVisible="False" Visibility="Collapsed" Opacity="0.8">
+                    <!-- Exact U.S. Visa Composition Template Overlay -->
+                    <!-- BUG FIX: Opacity increased, stroke colors made high-contrast solid black/red -->
+                    <Canvas x:Name="VisaBlueprint" IsHitTestVisible="False" Visibility="Collapsed" Opacity="0.95">
                         
                         <!-- Safe Eye Zone (56% to 69% from bottom = 44% to 31% from top) -->
-                        <Rectangle Fill="#35A0A0A0" Width="600" Height="78" Canvas.Top="186" />
+                        <Rectangle Fill="#5000FF00" Width="600" Height="78" Canvas.Top="186" />
                         
                         <!-- Center Line & Eye Line Guide -->
-                        <Line X1="260" Y1="225" X2="340" Y2="225" Stroke="#AA000000" StrokeThickness="1" StrokeDashArray="2 2"/>
-                        <Line X1="300" Y1="170" X2="300" Y2="280" Stroke="#AA000000" StrokeThickness="1" StrokeDashArray="2 2"/>
+                        <Line X1="260" Y1="225" X2="340" Y2="225" Stroke="#E0000000" StrokeThickness="2" StrokeDashArray="2 2"/>
+                        <Line X1="300" Y1="0" X2="300" Y2="600" Stroke="#A0FF0000" StrokeThickness="1" StrokeDashArray="4 4"/> <!-- Fixed: Line spans full 600px -->
                         
                         <!-- Head Height Bounds (Min 50% = 300px, Max 69% = 414px) -->
-                        <Line X1="550" Y1="42" X2="580" Y2="42" Stroke="#80000000" StrokeThickness="2" /> <!-- Max Crown (1 3/8" / 69%) -->
-                        <Line X1="550" Y1="150" X2="580" Y2="150" Stroke="#80000000" StrokeThickness="2" /> <!-- Min Crown (1" / 50%) -->
-                        <Line X1="565" Y1="42" X2="565" Y2="450" Stroke="#80000000" StrokeThickness="1" /> <!-- Bracket Line -->
-                        <Line X1="450" Y1="450" X2="580" Y2="450" Stroke="#80000000" StrokeThickness="2" /> <!-- Bottom of Chin -->
+                        <Line X1="0" Y1="42" X2="600" Y2="42" Stroke="#A0000000" StrokeThickness="1" StrokeDashArray="4 4" /> <!-- Fixed: Spans full width -->
+                        <Line X1="0" Y1="150" X2="600" Y2="150" Stroke="#A0000000" StrokeThickness="1" StrokeDashArray="4 4" /> <!-- Fixed: Spans full width -->
+                        
+                        <Line X1="565" Y1="42" X2="565" Y2="450" Stroke="#D0000000" StrokeThickness="2" /> <!-- Bracket Line -->
+                        <Line X1="550" Y1="42" X2="580" Y2="42" Stroke="#D0000000" StrokeThickness="2" /> <!-- Max Crown (1 3/8" / 69%) -->
+                        <Line X1="550" Y1="150" X2="580" Y2="150" Stroke="#D0000000" StrokeThickness="2" /> <!-- Min Crown (1" / 50%) -->
+                        
+                        <Line X1="0" Y1="450" X2="600" Y2="450" Stroke="#A0000000" StrokeThickness="1" StrokeDashArray="4 4" /> <!-- Bottom of Chin -->
+                        <Line X1="550" Y1="450" X2="580" Y2="450" Stroke="#D0000000" StrokeThickness="2" /> <!-- Bottom of Chin Bracket -->
                         
                         <!-- Head Silhouette Overlay -->
-                        <Path Stroke="#50000000" StrokeThickness="2" StrokeDashArray="4 4" Fill="Transparent" 
+                        <Path Stroke="#C0000000" StrokeThickness="2" StrokeDashArray="4 4" Fill="Transparent" 
                               Data="M 210,320 C 210,480 270,450 300,450 C 330,450 390,480 390,320 C 390,120 370,80 300,80 C 230,80 210,120 210,320 Z"/>
                               
                         <!-- Border Frame -->
-                        <Rectangle Width="600" Height="600" Stroke="#20000000" StrokeThickness="1"/>
+                        <Rectangle Width="600" Height="600" Stroke="#50000000" StrokeThickness="2"/>
                     </Canvas>
                 </Grid>
             </Border>
@@ -78,6 +84,7 @@
                     
                     <TextBlock Text="OUTPUT SETTINGS" FontSize="10" FontWeight="Bold" Foreground="#66666B" Margin="0,0,0,10"/>
                     
+                    <!-- BUG FIX: Changed font colors from dark gray to solid White -->
                     <ComboBox x:Name="CmbLayout" Height="36" Margin="0,0,0,12" SelectedIndex="0" Background="#222226" Foreground="White" BorderThickness="1" BorderBrush="#333338" Padding="10,0" FontSize="13" SelectionChanged="Setting_Changed">
                         <ComboBoxItem Content="Print Sheet 4x6 (6 Photos)"/>
                         <ComboBoxItem Content="Print Sheet 4x8 (8 Photos)"/>
@@ -95,7 +102,7 @@
                     <CheckBox x:Name="ChkSoftEdge" Content="Photographic Soft Edge" IsChecked="True" Foreground="#EEEEEE" FontSize="13" Margin="0,0,0,25" Click="Setting_Changed"/>
 
                     <!-- Reset Tools -->
-                    <Button x:Name="BtnSnapAuto" Content="⟲ Snap to AI Crop" Height="32" Background="#222226" Foreground="#AAAAAA" BorderBrush="#333338" FontSize="12" Cursor="Hand" Click="BtnSnapAuto_Click"/>
+                    <Button x:Name="BtnSnapAuto" Content="⟲ Snap to AI Crop" Height="32" Background="#222226" Foreground="#EEEEEE" BorderBrush="#333338" FontSize="12" Cursor="Hand" Click="BtnSnapAuto_Click"/>
                 </StackPanel>
 
                 <!-- Export Action -->
@@ -110,6 +117,7 @@
                     </Button>
                     <Button x:Name="BtnOpenFolder" Content="Open Output Folder" Height="30" Margin="0,10,0,0" Background="Transparent" Foreground="#1E90FF" BorderThickness="0" Visibility="Collapsed" Click="BtnOpenFolder_Click" Cursor="Hand"/>
                     
+                    <!-- BUG FIX: Added 'Created by Gil' text as requested -->
                     <TextBlock Text="Created by Gil" FontSize="10" Foreground="#444448" HorizontalAlignment="Right" Margin="0,20,0,0" FontStyle="Italic"/>
                 </StackPanel>
             </Grid>
