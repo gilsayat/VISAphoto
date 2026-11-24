@@ -92,10 +92,18 @@
                         <ComboBoxItem Content="Digital Single (2x2)"/>
                     </ComboBox>
 
-                    <ComboBox x:Name="CmbBgColor" Height="36" Margin="0,0,0,25" SelectedIndex="0" Background="#222226" Foreground="White" BorderThickness="1" BorderBrush="#333338" Padding="10,0" FontSize="13" SelectionChanged="Setting_Changed">
-                        <ComboBoxItem Content="Pure White Background"/>
-                        <ComboBoxItem Content="Studio Off-White Background"/>
-                    </ComboBox>
+                    <ComboBox x:Name="CmbLayout" Height="36" Margin="0,0,0,12" SelectedIndex="0" Background="White" Foreground="Black" BorderThickness="1" BorderBrush="#333338" Padding="10,0" FontSize="13" SelectionChanged="Setting_Changed">
+    <ComboBox.Resources>
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="Black"/>
+            <Setter Property="Background" Value="White"/>
+        </Style>
+    </ComboBox.Resources>
+    <ComboBoxItem Content="Print Sheet 4x6 (6 Photos)" Foreground="Black"/>
+    <ComboBoxItem Content="Print Sheet 4x8 (8 Photos)" Foreground="Black"/>
+    <ComboBoxItem Content="Print Sheet 5x10 (8 Photos)" Foreground="Black"/>
+    <ComboBoxItem Content="Digital Single (2x2)" Foreground="Black"/>
+</ComboBox>
 
                     <TextBlock Text="AI ENHANCEMENT" FontSize="10" FontWeight="Bold" Foreground="#66666B" Margin="0,0,0,10"/>
                     <CheckBox x:Name="ChkAutoLighting" Content="Auto-Fix Lighting &amp; Color" IsChecked="True" Foreground="#EEEEEE" FontSize="13" Margin="0,0,0,10" Click="Setting_Changed"/>
