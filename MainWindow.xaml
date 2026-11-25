@@ -11,7 +11,7 @@
             <ColumnDefinition Width="320"/>
         </Grid.ColumnDefinitions>
 
-        <!-- LEFT PANE: Smart Interactive Canvas -->
+        <!-- LEFT PANE -->
         <Grid Grid.Column="0" Background="#0A0A0C">
             <TextBlock Text="Shift+Scroll: Tilt  |  Scroll: Zoom  |  Drag: Pan" Foreground="#55555A" FontSize="11" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,15,0,0"/>
 
@@ -83,7 +83,7 @@
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
-                        <CheckBox x:Name="ChkSoftEdge" Content="Soft Edge" IsChecked="True" Foreground="#EEEEEE" FontSize="13" VerticalAlignment="Center" Click="Setting_Changed"/>
+                        <CheckBox x:Name="ChkSoftEdge" Content="Guided Matting" IsChecked="True" Foreground="#EEEEEE" FontSize="13" VerticalAlignment="Center" Click="Setting_Changed"/>
                         <Slider x:Name="SldFeather" Grid.Column="1" Minimum="0" Maximum="100" Value="50" Margin="15,0,0,0" VerticalAlignment="Center" ToolTip="Adjust Edge Feathering" ValueChanged="Slider_ValueChanged" IsEnabled="{Binding IsChecked, ElementName=ChkSoftEdge}"/>
                     </Grid>
 
@@ -96,7 +96,6 @@
                                 <TextBlock Text="U.S. VISA COMPLIANCE" FontSize="10" FontWeight="Bold" Foreground="#66666B" VerticalAlignment="Center"/>
                                 <TextBlock x:Name="LblOverallPass" Text="PASS" FontSize="11" FontWeight="Bold" Foreground="#10B981" HorizontalAlignment="Right" VerticalAlignment="Center"/>
                             </Grid>
-                            
                             <Grid Margin="0,0,0,10"><TextBlock Text="Head Height" FontSize="12" Foreground="#9A9AA0"/><StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><TextBlock x:Name="ValHeadHeight" Text="58.0% (1.16&quot;)" FontSize="11" Foreground="#E4E4E7" FontFamily="Consolas" Margin="0,0,15,0" VerticalAlignment="Center"/><TextBlock x:Name="StatHeadHeight" Text="PASS" FontSize="10" FontWeight="SemiBold" Foreground="#10B981" VerticalAlignment="Center" Width="35" TextAlignment="Right"/></StackPanel></Grid>
                             <Grid Margin="0,0,0,10"><TextBlock Text="Eye Level" FontSize="12" Foreground="#9A9AA0"/><StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><TextBlock x:Name="ValEyeLevel" Text="62.5% (1.25&quot;)" FontSize="11" Foreground="#E4E4E7" FontFamily="Consolas" Margin="0,0,15,0" VerticalAlignment="Center"/><TextBlock x:Name="StatEyeLevel" Text="PASS" FontSize="10" FontWeight="SemiBold" Foreground="#10B981" VerticalAlignment="Center" Width="35" TextAlignment="Right"/></StackPanel></Grid>
                             <Grid Margin="0,0,0,10"><TextBlock Text="Centering" FontSize="12" Foreground="#9A9AA0"/><StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><TextBlock x:Name="ValCentering" Text="0.0%" FontSize="11" Foreground="#E4E4E7" FontFamily="Consolas" Margin="0,0,15,0" VerticalAlignment="Center"/><TextBlock x:Name="StatCentering" Text="PASS" FontSize="10" FontWeight="SemiBold" Foreground="#10B981" VerticalAlignment="Center" Width="35" TextAlignment="Right"/></StackPanel></Grid>
