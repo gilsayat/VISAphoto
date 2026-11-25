@@ -165,6 +165,11 @@ namespace USVisaPhotoAutomator
             TriggerLiveRender();
         }
 
+        private void BtnResetFeather_Click(object sender, RoutedEventArgs e)
+        {
+            SldFeather.Value = 0;
+        }
+
         private async void TriggerLiveRender()
         {
             if (!_isEngineReady) return;
