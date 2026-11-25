@@ -22,7 +22,6 @@ namespace USVisaPhotoAutomator
         private bool _renderPending = false;
         private bool _isEngineReady = false;
 
-        // Smart Canvas Variables
         private bool _isDragging = false;
         private Point _dragStartPos;
         private double _panX = 0, _panY = 0;
@@ -65,7 +64,6 @@ namespace USVisaPhotoAutomator
             if (string.IsNullOrEmpty(filePath)) return;
             _lastInputPath = filePath; _lastOutputPath = null;
             _isEngineReady = false;
-            
             ResetManualOffsets();
 
             BtnGenerate.IsEnabled = false;
@@ -97,9 +95,6 @@ namespace USVisaPhotoAutomator
             finally { ProcessingProgress.Visibility = Visibility.Collapsed; }
         }
 
-        // ==========================================
-        // SMART CANVAS INTERACTIONS
-        // ==========================================
         private void Canvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             if (!_isEngineReady) return;
@@ -118,14 +113,11 @@ namespace USVisaPhotoAutomator
         private void Canvas_MouseMove(object sender, MouseEventArgs e)
         {
             if (!_isDragging || !_isEngineReady) return;
-
             Point currentPos = e.GetPosition(CanvasBorder);
             double deltaX = (currentPos.X - _dragStartPos.X) / 600.0 * 100.0;
             double deltaY = (currentPos.Y - _dragStartPos.Y) / 600.0 * 100.0;
             
-            _panX += deltaX;
-            _panY += deltaY;
-            
+            _panX += deltaX; _panY += deltaY;
             _dragStartPos = currentPos;
             TriggerLiveRender();
         }
@@ -135,11 +127,9 @@ namespace USVisaPhotoAutomator
             if (!_isEngineReady) return;
 
             if (_isShiftDown) {
-                // Tilt
                 double tiltDelta = e.Delta > 0 ? 0.5 : -0.5;
                 _tiltAngle = Math.Clamp(_tiltAngle + tiltDelta, -25, 25);
             } else {
-                // Zoom anchored towards cursor
                 double zoomDelta = e.Delta > 0 ? 2.0 : -2.0; 
                 _zoomScale = Math.Clamp(_zoomScale + zoomDelta, -20, 40);
                 
@@ -170,9 +160,11 @@ namespace USVisaPhotoAutomator
             TriggerLiveRender(); 
         }
 
-        // ==========================================
-        // RENDERING & COMPLIANCE HUD
-        // ==========================================
+        private void Slider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            TriggerLiveRender();
+        }
+
         private async void TriggerLiveRender()
         {
             if (!_isEngineReady) return;
@@ -187,11 +179,9 @@ namespace USVisaPhotoAutomator
                     _renderPending = false;
                     var req = GetCurrentRequest();
                     
-                    // Render image
                     byte[] frame = await Task.Run(() => _processor.RenderFrame(req, previewMode: true));
                     ShowImageFromBytes(frame);
                     
-                    // Compute and update compliance live
                     var report = _processor.ComputeCompliance(req);
                     UpdateComplianceUI(report);
                 }
@@ -202,27 +192,22 @@ namespace USVisaPhotoAutomator
         private void UpdateComplianceUI(ComplianceReport rep)
         {
             Dispatcher.Invoke(() => {
-                // Head Height
                 ValHeadHeight.Text = rep.HeadHeight.ValueText;
                 StatHeadHeight.Text = rep.HeadHeight.Pass ? "PASS" : "ADJUST";
                 StatHeadHeight.Foreground = rep.HeadHeight.Pass ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(245, 158, 11));
 
-                // Eye Level
                 ValEyeLevel.Text = rep.EyeLevel.ValueText;
                 StatEyeLevel.Text = rep.EyeLevel.Pass ? "PASS" : "ADJUST";
                 StatEyeLevel.Foreground = rep.EyeLevel.Pass ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(245, 158, 11));
 
-                // Centering
                 ValCentering.Text = rep.Centering.ValueText;
                 StatCentering.Text = rep.Centering.Pass ? "PASS" : "ADJUST";
                 StatCentering.Foreground = rep.Centering.Pass ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(245, 158, 11));
 
-                // Head Level
                 ValHeadLevel.Text = rep.HeadTilt.ValueText;
                 StatHeadLevel.Text = rep.HeadTilt.Pass ? "PASS" : "ADJUST";
                 StatHeadLevel.Foreground = rep.HeadTilt.Pass ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(245, 158, 11));
 
-                // Overall
                 LblOverallPass.Text = rep.OverallPass ? "PASS" : "ADJUST";
                 LblOverallPass.Foreground = rep.OverallPass ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(245, 158, 11));
             });
@@ -233,12 +218,14 @@ namespace USVisaPhotoAutomator
             PrintLayout layout = CmbLayout.SelectedIndex switch { 0 => PrintLayout.Print4x6, 1 => PrintLayout.Print4x8, 2 => PrintLayout.Print5x10, _ => PrintLayout.Digital2x2 };
             BackgroundColorOption bg = CmbBgColor.SelectedIndex == 0 ? BackgroundColorOption.White : BackgroundColorOption.OffWhite;
             EdgeFeatherMode edge = ChkSoftEdge.IsChecked == true ? EdgeFeatherMode.Soft : EdgeFeatherMode.Sharp;
+            double featherVal = ChkSoftEdge.IsChecked == true ? SldFeather.Value : 0;
 
             return new ProcessingRequest {
                 Layout = layout, BgColor = bg, EdgeMode = edge,
                 Tilt = _tiltAngle, ZoomOffset = _zoomScale,
                 PanX = _panX, PanY = _panY,
-                AutoFixLighting = ChkAutoLighting.IsChecked == true
+                AutoFixLighting = ChkAutoLighting.IsChecked == true,
+                FeatherIntensity = featherVal
             };
         }
 
@@ -246,7 +233,6 @@ namespace USVisaPhotoAutomator
         {
             if (!_isEngineReady || string.IsNullOrEmpty(_lastInputPath)) return;
             
-            // Native "Save As" Integration
             SaveFileDialog saveFileDialog = new SaveFileDialog
             {
                 Filter = "JPEG Image|*.jpg|All Files|*.*",
