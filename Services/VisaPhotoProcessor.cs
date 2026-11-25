@@ -57,6 +57,8 @@ namespace USVisaPhotoAutomator.Services
 
         private Bitmap? _masterOriginal;
         private Bitmap? _masterAlpha;
+        private Bitmap? _cachedSubjectLayer;
+        private EdgeFeatherMode? _cachedEdgeMode;
         private float _masterEyeX, _masterEyeY, _masterHairTopY, _masterChinY;
         private float _detectedEyeSlopeDeg = 0;
         private float _autoTiltDeg = 0;
@@ -90,6 +92,8 @@ namespace USVisaPhotoAutomator.Services
 
             _masterOriginal?.Dispose();
             _masterAlpha?.Dispose();
+            _cachedSubjectLayer?.Dispose();
+            _cachedSubjectLayer = null;
 
             _masterOriginal = LoadOrientedBitmap(filePath);
 
@@ -142,7 +146,6 @@ namespace USVisaPhotoAutomator.Services
             _autoGamma = CalculateAutoLightingGamma(_masterOriginal, (int)_masterEyeX, (int)_masterEyeY, (int)_masterChinY);
         }
 
-        // Structural fix: Returns raw numbers, avoids zero-division by clamping rawHeadHeight
         private (float scale, float targetEyeYOnCanvas, float panXPx, float panYPx, float totalTiltDeg) GetTransformParams(ProcessingRequest req, int targetSize)
         {
             float origH = _masterOriginal != null ? _masterOriginal.Height : targetSize;
@@ -161,7 +164,6 @@ namespace USVisaPhotoAutomator.Services
             return (scale, targetEyeYOnCanvas, panXPx, panYPx, totalTiltDeg);
         }
 
-        // Structural fix: Returns a struct to avoid GC stuttering in the live loop
         public ComplianceReport ComputeCompliance(ProcessingRequest req)
         {
             int targetSize = 600; 
@@ -211,6 +213,17 @@ namespace USVisaPhotoAutomator.Services
             };
         }
 
+        private Bitmap GetOrBuildSubjectLayer(ProcessingRequest req)
+        {
+            if (_cachedSubjectLayer != null && _cachedEdgeMode == req.EdgeMode) return _cachedSubjectLayer;
+
+            _cachedSubjectLayer?.Dispose();
+            _cachedSubjectLayer = ProcessSubjectLayer(_masterOriginal!, _masterAlpha!, req.AutoFixLighting ? _autoGamma : 1.0f, req.EdgeMode, _masterEyeY);
+            _cachedEdgeMode = req.EdgeMode;
+            
+            return _cachedSubjectLayer;
+        }
+
         public byte[] RenderFrame(ProcessingRequest req, bool previewMode)
         {
             if (_masterOriginal == null || _masterAlpha == null) throw new Exception("Engine not initialized.");
@@ -218,7 +231,7 @@ namespace USVisaPhotoAutomator.Services
             int targetSize = previewMode ? 600 : 1200; 
             byte bgTarget = req.BgColor == BackgroundColorOption.OffWhite ? (byte)242 : (byte)255;
 
-            using Bitmap subjectLayer = ProcessSubjectLayer(_masterOriginal, _masterAlpha, req.AutoFixLighting ? _autoGamma : 1.0f, req.EdgeMode);
+            Bitmap subjectLayer = GetOrBuildSubjectLayer(req);
 
             using Bitmap canvas = new Bitmap(targetSize, targetSize, PixelFormat.Format32bppArgb);
             using Graphics g = Graphics.FromImage(canvas);
@@ -226,8 +239,9 @@ namespace USVisaPhotoAutomator.Services
             if (!previewMode) g.Clear(System.Drawing.Color.FromArgb(bgTarget, bgTarget, bgTarget));
             else g.Clear(System.Drawing.Color.Transparent);
 
+            // Sub-Pixel Anti-Aliased Edges Fix
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.PixelOffsetMode = PixelOffsetMode.Half; 
             g.SmoothingMode = SmoothingMode.HighQuality;
 
             var t = GetTransformParams(req, targetSize);
@@ -267,7 +281,7 @@ namespace USVisaPhotoAutomator.Services
             SaveInjectingEXIF(finalSheet, req.OutputPath, _masterOriginal, req.Layout == PrintLayout.Digital2x2 ? 90 : 98, 600);
         }
 
-        private static Bitmap ProcessSubjectLayer(Bitmap orig, Bitmap alpha, float gamma, EdgeFeatherMode edgeMode)
+        private static Bitmap ProcessSubjectLayer(Bitmap orig, Bitmap alpha, float gamma, EdgeFeatherMode edgeMode, float masterEyeY)
         {
             int w = orig.Width, h = orig.Height;
             Bitmap argb = new Bitmap(w, h, PixelFormat.Format32bppArgb);
@@ -282,12 +296,17 @@ namespace USVisaPhotoAutomator.Services
                 lut[i] = (byte)Math.Clamp(Math.Round(Math.Pow(norm, gamma) * 255.0), 0, 255);
             }
 
-            float low = edgeMode == EdgeFeatherMode.Soft ? 0.15f : 0.40f;
-            float high = edgeMode == EdgeFeatherMode.Soft ? 0.85f : 0.60f;
+            float low = edgeMode == EdgeFeatherMode.Soft ? 0.14f : 0.38f;
+            float high = edgeMode == EdgeFeatherMode.Soft ? 0.86f : 0.62f;
             float range = high - low;
+            
+            int eyeYLim = (int)masterEyeY;
+            int stride = orig.Width * 4;
 
             unsafe {
                 byte* oPtr = (byte*)od.Scan0; byte* aPtr = (byte*)ad.Scan0; byte* rPtr = (byte*)rd.Scan0;
+                
+                // Pass 1: Standard Gamma and Smoothstep Alpha
                 for (int y = 0; y < h; y++) {
                     for (int x = 0; x < w; x++) {
                         int idx24 = (y * od.Stride) + (x * 3);
@@ -299,10 +318,43 @@ namespace USVisaPhotoAutomator.Services
 
                         float val = aPtr[idx24]/255f;
                         float a = 0f;
-                        if (val > high) a = 1f;
+                        if (val >= high) a = 1f;
                         else if (val > low) { float t = (val - low)/range; a = t*t*(3-2*t); }
                         
                         rPtr[idx32+3] = (byte)(a * 255f); 
+                    }
+                }
+                
+                // Pass 2: Hair Edge Defringing (Bounded to Top Half above Eyes)
+                int gap = Math.Clamp(w / 260, 2, 6);
+                int[] offsets = { -gap*4, gap*4, -gap*stride, gap*stride, -gap*4 - gap*stride, gap*4 - gap*stride, -gap*4 + gap*stride, gap*4 + gap*stride };
+                
+                for (int y = gap; y < eyeYLim; y++) {
+                    for (int x = gap; x < w - gap; x++) {
+                        int idx = (y * stride) + (x * 4);
+                        byte a = rPtr[idx+3];
+                        
+                        if (a > 3 && a < 245) // Only defringe semi-transparent pixels
+                        {
+                            int sumR = 0, sumG = 0, sumB = 0, sumW = 0;
+                            
+                            foreach(int offset in offsets) {
+                                int nIdx = idx + offset;
+                                if (nIdx > 0 && nIdx < (h * stride) && rPtr[nIdx+3] > 235) {
+                                    sumB += rPtr[nIdx];
+                                    sumG += rPtr[nIdx+1];
+                                    sumR += rPtr[nIdx+2];
+                                    sumW++;
+                                }
+                            }
+                            
+                            if (sumW > 0) {
+                                float blend = Math.Clamp((255 - a) / 255f * 0.9f, 0f, 0.9f);
+                                rPtr[idx] = (byte)(rPtr[idx] * (1-blend) + (sumB/sumW) * blend);
+                                rPtr[idx+1] = (byte)(rPtr[idx+1] * (1-blend) + (sumG/sumW) * blend);
+                                rPtr[idx+2] = (byte)(rPtr[idx+2] * (1-blend) + (sumR/sumW) * blend);
+                            }
+                        }
                     }
                 }
             }
@@ -463,6 +515,7 @@ namespace USVisaPhotoAutomator.Services
         { 
             lock(_modelLock) { _session?.Dispose(); _detector?.Dispose(); _predictor?.Dispose(); _isDisposed = true; } 
             _masterOriginal?.Dispose(); _masterAlpha?.Dispose();
+            _cachedSubjectLayer?.Dispose(); _cachedSubjectLayer = null;
         }
     }
 }
