@@ -21,6 +21,7 @@ namespace USVisaPhotoAutomator.Services
         public PrintLayout Layout { get; set; }
         public BackgroundColorOption BgColor { get; set; }
         public EdgeFeatherMode EdgeMode { get; set; }
+        public double FeatherIntensity { get; set; }
         public double Tilt { get; set; }
         public double ZoomOffset { get; set; }
         public double PanX { get; set; }
@@ -58,7 +59,12 @@ namespace USVisaPhotoAutomator.Services
         private Bitmap? _masterOriginal;
         private Bitmap? _masterAlpha;
         private Bitmap? _cachedSubjectLayer;
+        
+        // Cache Keys to fix the "Checkbox/Slider Bug"
         private EdgeFeatherMode? _cachedEdgeMode;
+        private bool? _cachedLightingMode;
+        private double? _cachedFeatherIntensity;
+        
         private float _masterEyeX, _masterEyeY, _masterHairTopY, _masterChinY;
         private float _detectedEyeSlopeDeg = 0;
         private float _autoTiltDeg = 0;
@@ -68,7 +74,6 @@ namespace USVisaPhotoAutomator.Services
 
         public VisaPhotoProcessor(string modelsDirectory)
         {
-            // MODNET STUDIO MATTING UPGRADE
             _onnxModelPath = Path.Combine(modelsDirectory, "modnet_photographic_portrait_matting.onnx");
             _dlibModelPath = Path.Combine(modelsDirectory, "shape_predictor_68_face_landmarks.dat");
         }
@@ -93,7 +98,7 @@ namespace USVisaPhotoAutomator.Services
         public void InitializeMasterFile(string filePath)
         {
             PreWarmModels();
-            if (_session == null || _detector == null || _predictor == null) throw new Exception("AI Models missing. Ensure modnet_photographic_portrait_matting.onnx is in the Models folder.");
+            if (_session == null || _detector == null || _predictor == null) throw new Exception("AI Models missing.");
 
             _masterOriginal?.Dispose();
             _masterAlpha?.Dispose();
@@ -219,11 +224,21 @@ namespace USVisaPhotoAutomator.Services
 
         private Bitmap GetOrBuildSubjectLayer(ProcessingRequest req)
         {
-            if (_cachedSubjectLayer != null && _cachedEdgeMode == req.EdgeMode) return _cachedSubjectLayer;
+            // BUG FIX: Caching now considers EdgeMode, Lighting, AND Feather Intensity
+            if (_cachedSubjectLayer != null && 
+                _cachedEdgeMode == req.EdgeMode && 
+                _cachedLightingMode == req.AutoFixLighting &&
+                _cachedFeatherIntensity == req.FeatherIntensity) 
+            {
+                return _cachedSubjectLayer;
+            }
 
             _cachedSubjectLayer?.Dispose();
-            _cachedSubjectLayer = ProcessSubjectLayer(_masterOriginal!, _masterAlpha!, req.AutoFixLighting ? _autoGamma : 1.0f, req.EdgeMode, _masterEyeY);
+            _cachedSubjectLayer = ProcessSubjectLayer(_masterOriginal!, _masterAlpha!, req.AutoFixLighting ? _autoGamma : 1.0f, req.EdgeMode, req.FeatherIntensity, _masterEyeY);
+            
             _cachedEdgeMode = req.EdgeMode;
+            _cachedLightingMode = req.AutoFixLighting;
+            _cachedFeatherIntensity = req.FeatherIntensity;
             
             return _cachedSubjectLayer;
         }
@@ -284,7 +299,7 @@ namespace USVisaPhotoAutomator.Services
             SaveInjectingEXIF(finalSheet, req.OutputPath, _masterOriginal, req.Layout == PrintLayout.Digital2x2 ? 90 : 98, 600);
         }
 
-        private static Bitmap ProcessSubjectLayer(Bitmap orig, Bitmap alpha, float gamma, EdgeFeatherMode edgeMode, float masterEyeY)
+        private static Bitmap ProcessSubjectLayer(Bitmap orig, Bitmap alpha, float gamma, EdgeFeatherMode edgeMode, double featherIntensity, float masterEyeY)
         {
             int w = orig.Width, h = orig.Height;
             Bitmap argb = new Bitmap(w, h, PixelFormat.Format32bppArgb);
@@ -299,9 +314,17 @@ namespace USVisaPhotoAutomator.Services
                 lut[i] = (byte)Math.Clamp(Math.Round(Math.Pow(norm, gamma) * 255.0), 0, 255);
             }
 
+            // Slider ranges from 0 to 100. (50 is default).
+            // Value 0 = Mask is tight/choked (alpha shifts down). Value 100 = Mask is soft/expanded (alpha shifts up).
+            int alphaShift = (int)((50 - featherIntensity) * 2.5);
+            
+            int eyeYLim = (int)masterEyeY;
+            int stride = orig.Width * 4;
+
             unsafe {
                 byte* oPtr = (byte*)od.Scan0; byte* aPtr = (byte*)ad.Scan0; byte* rPtr = (byte*)rd.Scan0;
                 
+                // PASS 1: Apply Gamma and map the Alpha matte with the Slider Shift
                 for (int y = 0; y < h; y++) {
                     for (int x = 0; x < w; x++) {
                         int idx24 = (y * od.Stride) + (x * 3);
@@ -315,7 +338,47 @@ namespace USVisaPhotoAutomator.Services
                         if (edgeMode == EdgeFeatherMode.Sharp) {
                             rPtr[idx32+3] = matteVal > 127 ? (byte)255 : (byte)0;
                         } else {
-                            rPtr[idx32+3] = matteVal < 5 ? (byte)0 : matteVal; 
+                            // Apply the manual feathering choke/spread
+                            int shiftedA = matteVal - alphaShift;
+                            rPtr[idx32+3] = (byte)Math.Clamp(shiftedA, 0, 255); 
+                        }
+                    }
+                }
+                
+                // PASS 2: Re-Inject C# Defringing!
+                // MODNet extracts true alpha (strands), but leaves original background color mixed in. 
+                // We MUST mathematically steal color from solid hair to wipe out the background halo on the transparent strands.
+                if (edgeMode == EdgeFeatherMode.Soft) {
+                    int gap = Math.Clamp(w / 260, 2, 6);
+                    int[] offsets = { -gap*4, gap*4, -gap*stride, gap*stride, -gap*4 - gap*stride, gap*4 - gap*stride, -gap*4 + gap*stride, gap*4 + gap*stride };
+                    
+                    for (int y = gap; y < eyeYLim; y++) { // Only run geographically above the eyes (Hair)
+                        for (int x = gap; x < w - gap; x++) {
+                            int idx = (y * stride) + (x * 4);
+                            byte a = rPtr[idx+3];
+                            
+                            // Target semi-transparent hair pixels where original background color is trapped
+                            if (a > 3 && a < 245) { 
+                                int sumR = 0, sumG = 0, sumB = 0, sumW = 0;
+                                foreach(int offset in offsets) {
+                                    int nIdx = idx + offset;
+                                    // Search inward for a solid hair strand pixel (a > 235)
+                                    if (nIdx > 0 && nIdx < (h * stride) && rPtr[nIdx+3] > 235) {
+                                        sumB += rPtr[nIdx];
+                                        sumG += rPtr[nIdx+1];
+                                        sumR += rPtr[nIdx+2];
+                                        sumW++;
+                                    }
+                                }
+                                
+                                // Override the contaminated pixel with the stolen pure hair color
+                                if (sumW > 0) {
+                                    float blend = Math.Clamp((255 - a) / 255f * 0.95f, 0f, 0.95f);
+                                    rPtr[idx] = (byte)(rPtr[idx] * (1-blend) + (sumB/sumW) * blend);
+                                    rPtr[idx+1] = (byte)(rPtr[idx+1] * (1-blend) + (sumG/sumW) * blend);
+                                    rPtr[idx+2] = (byte)(rPtr[idx+2] * (1-blend) + (sumR/sumW) * blend);
+                                }
+                            }
                         }
                     }
                 }
