@@ -73,6 +73,7 @@ namespace USVisaPhotoAutomator
             ProcessingProgress.Visibility = Visibility.Visible;
             PlaceholderUI.Visibility = Visibility.Collapsed;
             PreviewImage.Visibility = Visibility.Collapsed;
+            CompliancePanel.Visibility = Visibility.Collapsed;
 
             try 
             {
@@ -81,6 +82,7 @@ namespace USVisaPhotoAutomator
                 
                 CanvasBorder.Background = (CmbBgColor.SelectedIndex == 0) ? new SolidColorBrush(Colors.White) : new SolidColorBrush(Color.FromRgb(242, 242, 242));
                 VisaBlueprint.Visibility = Visibility.Visible;
+                CompliancePanel.Visibility = Visibility.Visible;
                 BtnGenerate.IsEnabled = true;
                 BtnOpenFolder.Visibility = Visibility.Collapsed;
                 UpdateStatus("Ready. Drag to Pan, Scroll to Zoom.", "#00FF7F");
@@ -169,7 +171,7 @@ namespace USVisaPhotoAutomator
         }
 
         // ==========================================
-        // RENDERING
+        // RENDERING & COMPLIANCE HUD
         // ==========================================
         private async void TriggerLiveRender()
         {
@@ -184,11 +186,46 @@ namespace USVisaPhotoAutomator
                 {
                     _renderPending = false;
                     var req = GetCurrentRequest();
+                    
+                    // Render image
                     byte[] frame = await Task.Run(() => _processor.RenderFrame(req, previewMode: true));
                     ShowImageFromBytes(frame);
+                    
+                    // Compute and update compliance live
+                    var report = _processor.ComputeCompliance(req);
+                    UpdateComplianceUI(report);
                 }
             }
             finally { _isRendering = false; }
+        }
+
+        private void UpdateComplianceUI(ComplianceReport rep)
+        {
+            Dispatcher.Invoke(() => {
+                // Head Height
+                ValHeadHeight.Text = rep.HeadHeight.ValueText;
+                StatHeadHeight.Text = rep.HeadHeight.Pass ? "PASS" : "ADJUST";
+                StatHeadHeight.Foreground = rep.HeadHeight.Pass ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(245, 158, 11));
+
+                // Eye Level
+                ValEyeLevel.Text = rep.EyeLevel.ValueText;
+                StatEyeLevel.Text = rep.EyeLevel.Pass ? "PASS" : "ADJUST";
+                StatEyeLevel.Foreground = rep.EyeLevel.Pass ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(245, 158, 11));
+
+                // Centering
+                ValCentering.Text = rep.Centering.ValueText;
+                StatCentering.Text = rep.Centering.Pass ? "PASS" : "ADJUST";
+                StatCentering.Foreground = rep.Centering.Pass ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(245, 158, 11));
+
+                // Head Level
+                ValHeadLevel.Text = rep.HeadTilt.ValueText;
+                StatHeadLevel.Text = rep.HeadTilt.Pass ? "PASS" : "ADJUST";
+                StatHeadLevel.Foreground = rep.HeadTilt.Pass ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(245, 158, 11));
+
+                // Overall
+                LblOverallPass.Text = rep.OverallPass ? "PASS" : "ADJUST";
+                LblOverallPass.Foreground = rep.OverallPass ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(245, 158, 11));
+            });
         }
 
         private ProcessingRequest GetCurrentRequest()
