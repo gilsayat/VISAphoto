@@ -245,17 +245,26 @@ namespace USVisaPhotoAutomator
         private async void BtnGenerate_Click(object sender, RoutedEventArgs e)
         {
             if (!_isEngineReady || string.IsNullOrEmpty(_lastInputPath)) return;
-            BtnGenerate.IsEnabled = false;
             
+            // Native "Save As" Integration
+            SaveFileDialog saveFileDialog = new SaveFileDialog
+            {
+                Filter = "JPEG Image|*.jpg|All Files|*.*",
+                Title = "Save U.S. Visa Photo Print Sheet",
+                FileName = $"{Path.GetFileNameWithoutExtension(_lastInputPath)}_VisaReady.jpg",
+                InitialDirectory = Path.GetDirectoryName(_lastInputPath) ?? AppDomain.CurrentDomain.BaseDirectory
+            };
+
+            if (saveFileDialog.ShowDialog() != true) return;
+            string outputPath = saveFileDialog.FileName;
+
+            BtnGenerate.IsEnabled = false;
             try
             {
                 UpdateStatus("Compiling 600 DPI Master Print Sheet...", "#0066FF");
                 ProcessingProgress.Visibility = Visibility.Visible;
 
                 var req = GetCurrentRequest();
-                string ext = "jpg";
-                string outputFilename = $"{Path.GetFileNameWithoutExtension(_lastInputPath)}_VisaReady.{ext}";
-                string outputPath = Path.Combine(Path.GetDirectoryName(_lastInputPath) ?? AppDomain.CurrentDomain.BaseDirectory, outputFilename);
                 req.OutputPath = outputPath;
 
                 await Task.Run(() => _processor.GenerateHighResPrint(req));
