@@ -68,7 +68,8 @@ namespace USVisaPhotoAutomator.Services
 
         public VisaPhotoProcessor(string modelsDirectory)
         {
-            _onnxModelPath = Path.Combine(modelsDirectory, "u2net.onnx");
+            // MODNET STUDIO MATTING UPGRADE
+            _onnxModelPath = Path.Combine(modelsDirectory, "modnet_photographic_portrait_matting.onnx");
             _dlibModelPath = Path.Combine(modelsDirectory, "shape_predictor_68_face_landmarks.dat");
         }
 
@@ -79,7 +80,11 @@ namespace USVisaPhotoAutomator.Services
             {
                 if (_session != null) return;
                 if (!File.Exists(_onnxModelPath) || !File.Exists(_dlibModelPath)) return;
-                _session = new InferenceSession(_onnxModelPath, new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL });
+                
+                var options = new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
+                options.AppendExecutionProvider_CPU();
+                
+                _session = new InferenceSession(_onnxModelPath, options);
                 _detector = Dlib.GetFrontalFaceDetector();
                 _predictor = ShapePredictor.Deserialize(_dlibModelPath);
             }
@@ -88,7 +93,7 @@ namespace USVisaPhotoAutomator.Services
         public void InitializeMasterFile(string filePath)
         {
             PreWarmModels();
-            if (_session == null || _detector == null || _predictor == null) throw new Exception("AI Models missing.");
+            if (_session == null || _detector == null || _predictor == null) throw new Exception("AI Models missing. Ensure modnet_photographic_portrait_matting.onnx is in the Models folder.");
 
             _masterOriginal?.Dispose();
             _masterAlpha?.Dispose();
@@ -140,7 +145,7 @@ namespace USVisaPhotoAutomator.Services
                 _autoTiltDeg = 0;
             }
 
-            _masterAlpha = GetCoarseMask(_masterOriginal);
+            _masterAlpha = GetStudioMatte(_masterOriginal);
             _masterHairTopY = _faceFound ? DetectHairTop(_masterAlpha, _masterEyeX, _masterEyeY, _masterChinY) : (_masterOriginal.Height * 0.2f);
             
             _autoGamma = CalculateAutoLightingGamma(_masterOriginal, (int)_masterEyeX, (int)_masterEyeY, (int)_masterChinY);
@@ -156,7 +161,6 @@ namespace USVisaPhotoAutomator.Services
             float scale = baseScale * (1.0f + (float)req.ZoomOffset / 100f);
             
             float targetEyeYOnCanvas = targetSize * 0.375f; 
-            
             float panXPx = (float)req.PanX * (targetSize * 0.01f); 
             float panYPx = (float)req.PanY * (targetSize * 0.01f);
             float totalTiltDeg = _autoTiltDeg + (float)req.Tilt;
@@ -239,7 +243,6 @@ namespace USVisaPhotoAutomator.Services
             if (!previewMode) g.Clear(System.Drawing.Color.FromArgb(bgTarget, bgTarget, bgTarget));
             else g.Clear(System.Drawing.Color.Transparent);
 
-            // Sub-Pixel Anti-Aliased Edges Fix
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             g.PixelOffsetMode = PixelOffsetMode.Half; 
             g.SmoothingMode = SmoothingMode.HighQuality;
@@ -296,17 +299,9 @@ namespace USVisaPhotoAutomator.Services
                 lut[i] = (byte)Math.Clamp(Math.Round(Math.Pow(norm, gamma) * 255.0), 0, 255);
             }
 
-            float low = edgeMode == EdgeFeatherMode.Soft ? 0.14f : 0.38f;
-            float high = edgeMode == EdgeFeatherMode.Soft ? 0.86f : 0.62f;
-            float range = high - low;
-            
-            int eyeYLim = (int)masterEyeY;
-            int stride = orig.Width * 4;
-
             unsafe {
                 byte* oPtr = (byte*)od.Scan0; byte* aPtr = (byte*)ad.Scan0; byte* rPtr = (byte*)rd.Scan0;
                 
-                // Pass 1: Standard Gamma and Smoothstep Alpha
                 for (int y = 0; y < h; y++) {
                     for (int x = 0; x < w; x++) {
                         int idx24 = (y * od.Stride) + (x * 3);
@@ -315,45 +310,12 @@ namespace USVisaPhotoAutomator.Services
                         rPtr[idx32] = lut[oPtr[idx24]];       // B
                         rPtr[idx32+1] = lut[oPtr[idx24+1]];   // G
                         rPtr[idx32+2] = lut[oPtr[idx24+2]];   // R
-
-                        float val = aPtr[idx24]/255f;
-                        float a = 0f;
-                        if (val >= high) a = 1f;
-                        else if (val > low) { float t = (val - low)/range; a = t*t*(3-2*t); }
                         
-                        rPtr[idx32+3] = (byte)(a * 255f); 
-                    }
-                }
-                
-                // Pass 2: Hair Edge Defringing (Bounded to Top Half above Eyes)
-                int gap = Math.Clamp(w / 260, 2, 6);
-                int[] offsets = { -gap*4, gap*4, -gap*stride, gap*stride, -gap*4 - gap*stride, gap*4 - gap*stride, -gap*4 + gap*stride, gap*4 + gap*stride };
-                
-                for (int y = gap; y < eyeYLim; y++) {
-                    for (int x = gap; x < w - gap; x++) {
-                        int idx = (y * stride) + (x * 4);
-                        byte a = rPtr[idx+3];
-                        
-                        if (a > 3 && a < 245) // Only defringe semi-transparent pixels
-                        {
-                            int sumR = 0, sumG = 0, sumB = 0, sumW = 0;
-                            
-                            foreach(int offset in offsets) {
-                                int nIdx = idx + offset;
-                                if (nIdx > 0 && nIdx < (h * stride) && rPtr[nIdx+3] > 235) {
-                                    sumB += rPtr[nIdx];
-                                    sumG += rPtr[nIdx+1];
-                                    sumR += rPtr[nIdx+2];
-                                    sumW++;
-                                }
-                            }
-                            
-                            if (sumW > 0) {
-                                float blend = Math.Clamp((255 - a) / 255f * 0.9f, 0f, 0.9f);
-                                rPtr[idx] = (byte)(rPtr[idx] * (1-blend) + (sumB/sumW) * blend);
-                                rPtr[idx+1] = (byte)(rPtr[idx+1] * (1-blend) + (sumG/sumW) * blend);
-                                rPtr[idx+2] = (byte)(rPtr[idx+2] * (1-blend) + (sumR/sumW) * blend);
-                            }
+                        byte matteVal = aPtr[idx24];
+                        if (edgeMode == EdgeFeatherMode.Sharp) {
+                            rPtr[idx32+3] = matteVal > 127 ? (byte)255 : (byte)0;
+                        } else {
+                            rPtr[idx32+3] = matteVal < 5 ? (byte)0 : matteVal; 
                         }
                     }
                 }
@@ -386,37 +348,55 @@ namespace USVisaPhotoAutomator.Services
             return Math.Clamp((float)(Math.Log(0.56) / Math.Log(Math.Max(0.1, avg))), 0.75f, 1.25f);
         }
 
-        private Bitmap GetCoarseMask(Bitmap source)
+        private Bitmap GetStudioMatte(Bitmap source)
         {
-            using var resized = new Bitmap(320, 320, PixelFormat.Format24bppRgb);
-            using (var g = Graphics.FromImage(resized)) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.DrawImage(source, 0, 0, 320, 320); }
-            var tensor = new DenseTensor<float>(new[] { 1, 3, 320, 320 });
-            var bd = resized.LockBits(new System.Drawing.Rectangle(0, 0, 320, 320), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            int size = 512;
+            using var resized = new Bitmap(size, size, PixelFormat.Format24bppRgb);
+            using (var g = Graphics.FromImage(resized)) { 
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic; 
+                g.DrawImage(source, 0, 0, size, size); 
+            }
+            
+            var tensor = new DenseTensor<float>(new[] { 1, 3, size, size });
+            var bd = resized.LockBits(new System.Drawing.Rectangle(0, 0, size, size), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            
             unsafe
             {
                 byte* ptr = (byte*)bd.Scan0;
-                for (int y = 0; y < 320; y++) for (int x = 0; x < 320; x++) {
-                    tensor[0,0,y,x] = (ptr[(y*bd.Stride)+(x*3)+2]/255f - 0.485f)/0.229f;
-                    tensor[0,1,y,x] = (ptr[(y*bd.Stride)+(x*3)+1]/255f - 0.456f)/0.224f;
-                    tensor[0,2,y,x] = (ptr[(y*bd.Stride)+(x*3)]/255f - 0.406f)/0.225f;
+                for (int y = 0; y < size; y++) {
+                    for (int x = 0; x < size; x++) {
+                        int p = (y * bd.Stride) + (x * 3);
+                        tensor[0, 0, y, x] = (ptr[p + 2] - 127.5f) / 127.5f; // R
+                        tensor[0, 1, y, x] = (ptr[p + 1] - 127.5f) / 127.5f; // G
+                        tensor[0, 2, y, x] = (ptr[p + 0] - 127.5f) / 127.5f; // B
+                    }
                 }
             }
             resized.UnlockBits(bd);
+            
             using var res = _session!.Run(new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(_session.InputMetadata.Keys.First(), tensor) });
             var ot = res.First().AsTensor<float>();
 
-            using var sm = new Bitmap(320, 320, PixelFormat.Format24bppRgb);
-            var sd = sm.LockBits(new System.Drawing.Rectangle(0,0,320,320), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+            using var sm = new Bitmap(size, size, PixelFormat.Format24bppRgb);
+            var sd = sm.LockBits(new System.Drawing.Rectangle(0,0,size,size), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
             unsafe {
                 byte* ptr = (byte*)sd.Scan0;
-                for (int y = 0; y < 320; y++) for (int x = 0; x < 320; x++) {
-                    byte m = (byte)(Math.Clamp(ot[0,0,y,x], 0f, 1f) * 255f);
-                    ptr[(y*sd.Stride)+(x*3)] = m; ptr[(y*sd.Stride)+(x*3)+1] = m; ptr[(y*sd.Stride)+(x*3)+2] = m;
+                for (int y = 0; y < size; y++) {
+                    for (int x = 0; x < size; x++) {
+                        byte m = (byte)(Math.Clamp(ot[0,0,y,x], 0f, 1f) * 255f);
+                        int p = (y * sd.Stride) + (x * 3);
+                        ptr[p] = m; ptr[p+1] = m; ptr[p+2] = m;
+                    }
                 }
             }
             sm.UnlockBits(sd);
+            
             var output = new Bitmap(source.Width, source.Height, PixelFormat.Format24bppRgb);
-            using (var gm = Graphics.FromImage(output)) { gm.InterpolationMode = InterpolationMode.HighQualityBicubic; gm.DrawImage(sm, 0, 0, source.Width, source.Height); }
+            using (var gm = Graphics.FromImage(output)) { 
+                gm.InterpolationMode = InterpolationMode.HighQualityBicubic; 
+                gm.SmoothingMode = SmoothingMode.HighQuality;
+                gm.DrawImage(sm, 0, 0, source.Width, source.Height); 
+            }
             return output;
         }
 
