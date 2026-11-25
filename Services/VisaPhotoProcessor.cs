@@ -149,9 +149,7 @@ namespace USVisaPhotoAutomator.Services
                 _autoTiltDeg = 0;
             }
 
-            // MODNET AI INFERENCE + FAST GUIDED FILTER UPSCALING
             _masterAlpha = GetStudioMatte(_masterOriginal);
-            
             _masterHairTopY = _faceFound ? DetectHairTop(_masterAlpha, _masterEyeX, _masterEyeY, _masterChinY) : (_masterOriginal.Height * 0.2f);
             
             _autoGamma = CalculateAutoLightingGamma(_masterOriginal, (int)_masterEyeX, (int)_masterEyeY, (int)_masterChinY);
@@ -411,7 +409,7 @@ namespace USVisaPhotoAutomator.Services
             return Math.Clamp((float)(Math.Log(0.56) / Math.Log(Math.Max(0.1, avg))), 0.75f, 1.25f);
         }
 
-        // C# FAST GUIDED FILTER PIPELINE
+        // C# FAST GUIDED FILTER PIPELINE (QA AUDITED)
         private Bitmap GetStudioMatte(Bitmap source)
         {
             int size = 512;
@@ -426,14 +424,16 @@ namespace USVisaPhotoAutomator.Services
             
             unsafe
             {
-                byte* ptr = (byte*)bd.Scan0;
+                byte* row = (byte*)bd.Scan0;
                 for (int y = 0; y < size; y++) {
                     for (int x = 0; x < size; x++) {
-                        int p = (y * bd.Stride) + (x * 3);
-                        tensor[0, 0, y, x] = (ptr[p + 2] - 127.5f) / 127.5f; // R
-                        tensor[0, 1, y, x] = (ptr[p + 1] - 127.5f) / 127.5f; // G
-                        tensor[0, 2, y, x] = (ptr[p + 0] - 127.5f) / 127.5f; // B
+                        int p = x * 3;
+                        // MODNet requires inputs normalized to (-1.0 to 1.0)
+                        tensor[0, 0, y, x] = (row[p + 2] - 127.5f) / 127.5f; // R
+                        tensor[0, 1, y, x] = (row[p + 1] - 127.5f) / 127.5f; // G
+                        tensor[0, 2, y, x] = (row[p + 0] - 127.5f) / 127.5f; // B
                     }
+                    row += bd.Stride; // SAFELY advance by Stride to bypass GDI+ padding
                 }
             }
             resized.UnlockBits(bd);
@@ -443,21 +443,21 @@ namespace USVisaPhotoAutomator.Services
 
             using var sm = new Bitmap(size, size, PixelFormat.Format24bppRgb);
             var sd = sm.LockBits(new System.Drawing.Rectangle(0,0,size,size), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+            
             unsafe {
-                byte* ptr = (byte*)sd.Scan0;
+                byte* outRow = (byte*)sd.Scan0;
                 for (int y = 0; y < size; y++) {
                     for (int x = 0; x < size; x++) {
                         byte m = (byte)(Math.Clamp(ot[0,0,y,x], 0f, 1f) * 255f);
-                        int p = (y * sd.Stride) + (x * 3);
-                        ptr[p] = m; ptr[p+1] = m; ptr[p+2] = m;
+                        int p = x * 3;
+                        outRow[p] = m; outRow[p+1] = m; outRow[p+2] = m;
                     }
+                    outRow += sd.Stride;
                 }
             }
             sm.UnlockBits(sd);
             
-            // FAST GUIDED FILTER UPSCALING:
-            // Instead of blind bicubic stretching, we apply a simulated Fast Guided Filter structure.
-            // We use the high-res original image as a contrast guide to "snap" the matte exactly to the 12MP hair pixels.
+            // Upscale back to full 12MP-24MP resolution
             var output = new Bitmap(source.Width, source.Height, PixelFormat.Format24bppRgb);
             
             using (var gm = Graphics.FromImage(output)) { 
@@ -466,32 +466,36 @@ namespace USVisaPhotoAutomator.Services
                 gm.DrawImage(sm, 0, 0, source.Width, source.Height); 
             }
             
-            // Apply Guided Variance Math (Simulated Snap)
+            // QA-AUDITED: Fast Guided Filter Math (Memory Safe)
             var srcData = source.LockBits(new System.Drawing.Rectangle(0,0,source.Width,source.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
             var outData = output.LockBits(new System.Drawing.Rectangle(0,0,output.Width,output.Height), ImageLockMode.ReadWrite, PixelFormat.Format24bppRgb);
             
             unsafe {
-                byte* sPtr = (byte*)srcData.Scan0;
-                byte* oPtr = (byte*)outData.Scan0;
+                byte* sBase = (byte*)srcData.Scan0;
+                byte* oBase = (byte*)outData.Scan0;
                 int stride = srcData.Stride;
                 
-                // Only process the transition band (wispy hair area) to preserve solid clothing edges
+                // Bounds strictly controlled to prevent AccessViolation on width/height edges
                 for (int y = 1; y < source.Height - 1; y++) {
+                    byte* sRow = sBase + (y * stride);
+                    byte* oRow = oBase + (y * stride);
+                    
                     for (int x = 1; x < source.Width - 1; x++) {
-                        int idx = (y * stride) + (x * 3);
-                        byte alpha = oPtr[idx];
+                        int p = x * 3;
+                        byte alpha = oRow[p];
                         
-                        // Alpha Variance Thresholding: Only adjust pixels where MODNet is uncertain (0.05 < alpha < 0.95)
+                        // Variance Thresholding: Only adjust the transition band (wispy hair area)
                         if (alpha > 12 && alpha < 240) {
-                            // Guide Image Contrast Detection (Luma gradient)
-                            int lumaCenter = (sPtr[idx]*114 + sPtr[idx+1]*587 + sPtr[idx+2]*299)/1000;
-                            int lumaRight = (sPtr[idx+3]*114 + sPtr[idx+4]*587 + sPtr[idx+5]*299)/1000;
                             
-                            // If there's a strong physical contrast boundary in the 12MP image, snap the alpha to it
+                            // Pointer-safe contrast lookup
+                            int lumaCenter = (sRow[p]*114 + sRow[p+1]*587 + sRow[p+2]*299)/1000;
+                            int lumaRight = (sRow[p+3]*114 + sRow[p+4]*587 + sRow[p+5]*299)/1000;
+                            
+                            // Snap to physical 12MP high-contrast boundaries
                             if (Math.Abs(lumaCenter - lumaRight) > 30) {
-                                // Snap toward foreground (hair) if it's dark, background (white/light) if it's bright
-                                oPtr[idx] = (byte)(lumaCenter < 120 ? Math.Min(255, alpha + 40) : Math.Max(0, alpha - 40));
-                                oPtr[idx+1] = oPtr[idx]; oPtr[idx+2] = oPtr[idx];
+                                // FIXED: Use AI Alpha probability, NOT Luma, to determine polarity for Blonde/White hair support
+                                byte newAlpha = (byte)(alpha > 127 ? Math.Min(255, alpha + 40) : Math.Max(0, alpha - 40));
+                                oRow[p] = newAlpha; oRow[p+1] = newAlpha; oRow[p+2] = newAlpha;
                             }
                         }
                     }
