@@ -333,15 +333,22 @@ namespace USVisaPhotoAutomator.Services
                         if (edgeMode == EdgeFeatherMode.Sharp) {
                             rPtr[idx32+3] = matteVal > 127 ? (byte)255 : (byte)0;
                         } else {
-                            // Strand Sharpening: Boost translucent hair above a threshold so it doesn't look washed out/gray
-                            int shiftedA = matteVal - alphaShift;
-                            if (shiftedA > 110 && shiftedA < 200 && y < eyeYLim) shiftedA = Math.Min(255, shiftedA + 40); 
-                            rPtr[idx32+3] = (byte)Math.Clamp(shiftedA, 0, 255); 
+                            // FIX: The Global Math Trap (Trimap Architecture)
+                            // We MUST mathematically lock the solid face and dead background so the slider cannot feather them.
+                            if (matteVal > 240) {
+                                rPtr[idx32+3] = 255;
+                            } else if (matteVal < 10) {
+                                rPtr[idx32+3] = 0;
+                            } else {
+                                // Apply the slider ONLY to the wispy transition zone
+                                int shiftedA = matteVal - alphaShift;
+                                rPtr[idx32+3] = (byte)Math.Clamp(shiftedA, 0, 255); 
+                            }
                         }
                     }
                 }
                 
-                // PASS 2: Luma-Weighted Defringing (Geographically bounded)
+                // PASS 2: Luma-Weighted Defringing
                 if (edgeMode == EdgeFeatherMode.Soft) {
                     int gap = Math.Clamp(w / 260, 2, 6);
                     int[] offsets = { -gap*4, gap*4, -gap*stride, gap*stride, -gap*4 - gap*stride, gap*4 - gap*stride, -gap*4 + gap*stride, gap*4 + gap*stride };
@@ -352,15 +359,12 @@ namespace USVisaPhotoAutomator.Services
                             byte a = rPtr[idx+3];
                             
                             if (a > 3 && a < 245) { 
-                                // Calculate base Luma of the semi-transparent pixel
                                 float baseLuma = rPtr[idx]*0.114f + rPtr[idx+1]*0.587f + rPtr[idx+2]*0.299f;
-                                
                                 int sumR = 0, sumG = 0, sumB = 0, sumW = 0;
                                 foreach(int offset in offsets) {
                                     int nIdx = idx + offset;
                                     if (nIdx > 0 && nIdx < (h * stride) && rPtr[nIdx+3] > 235) {
                                         float neighborLuma = rPtr[nIdx]*0.114f + rPtr[nIdx+1]*0.587f + rPtr[nIdx+2]*0.299f;
-                                        // Only steal color if the neighbor luma is relatively dark (i.e. it's hair, not skin)
                                         if (Math.Abs(baseLuma - neighborLuma) < 80 || neighborLuma < 100) {
                                             sumB += rPtr[nIdx];
                                             sumG += rPtr[nIdx+1];
@@ -369,7 +373,6 @@ namespace USVisaPhotoAutomator.Services
                                         }
                                     }
                                 }
-                                
                                 if (sumW > 0) {
                                     float blend = Math.Clamp((255 - a) / 255f * 0.95f, 0f, 0.95f);
                                     rPtr[idx] = (byte)(rPtr[idx] * (1-blend) + (sumB/sumW) * blend);
@@ -409,7 +412,6 @@ namespace USVisaPhotoAutomator.Services
             return Math.Clamp((float)(Math.Log(0.56) / Math.Log(Math.Max(0.1, avg))), 0.75f, 1.25f);
         }
 
-        // C# FAST GUIDED FILTER PIPELINE (QA AUDITED)
         private Bitmap GetStudioMatte(Bitmap source)
         {
             int size = 512;
@@ -428,12 +430,11 @@ namespace USVisaPhotoAutomator.Services
                 for (int y = 0; y < size; y++) {
                     for (int x = 0; x < size; x++) {
                         int p = x * 3;
-                        // MODNet requires inputs normalized to (-1.0 to 1.0)
-                        tensor[0, 0, y, x] = (row[p + 2] - 127.5f) / 127.5f; // R
-                        tensor[0, 1, y, x] = (row[p + 1] - 127.5f) / 127.5f; // G
-                        tensor[0, 2, y, x] = (row[p + 0] - 127.5f) / 127.5f; // B
+                        tensor[0, 0, y, x] = (row[p + 2] - 127.5f) / 127.5f; 
+                        tensor[0, 1, y, x] = (row[p + 1] - 127.5f) / 127.5f; 
+                        tensor[0, 2, y, x] = (row[p + 0] - 127.5f) / 127.5f; 
                     }
-                    row += bd.Stride; // SAFELY advance by Stride to bypass GDI+ padding
+                    row += bd.Stride;
                 }
             }
             resized.UnlockBits(bd);
@@ -457,7 +458,6 @@ namespace USVisaPhotoAutomator.Services
             }
             sm.UnlockBits(sd);
             
-            // Upscale back to full 12MP-24MP resolution
             var output = new Bitmap(source.Width, source.Height, PixelFormat.Format24bppRgb);
             
             using (var gm = Graphics.FromImage(output)) { 
@@ -466,7 +466,6 @@ namespace USVisaPhotoAutomator.Services
                 gm.DrawImage(sm, 0, 0, source.Width, source.Height); 
             }
             
-            // QA-AUDITED: Fast Guided Filter Math (Memory Safe)
             var srcData = source.LockBits(new System.Drawing.Rectangle(0,0,source.Width,source.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
             var outData = output.LockBits(new System.Drawing.Rectangle(0,0,output.Width,output.Height), ImageLockMode.ReadWrite, PixelFormat.Format24bppRgb);
             
@@ -475,27 +474,32 @@ namespace USVisaPhotoAutomator.Services
                 byte* oBase = (byte*)outData.Scan0;
                 int stride = srcData.Stride;
                 
-                // Bounds strictly controlled to prevent AccessViolation on width/height edges
+                // Bounds must leave a safety margin of at least 3 pixels to check local variance
                 for (int y = 1; y < source.Height - 1; y++) {
                     byte* sRow = sBase + (y * stride);
                     byte* oRow = oBase + (y * stride);
                     
-                    for (int x = 1; x < source.Width - 1; x++) {
+                    for (int x = 3; x < source.Width - 3; x++) {
                         int p = x * 3;
                         byte alpha = oRow[p];
                         
-                        // Variance Thresholding: Only adjust the transition band (wispy hair area)
-                        if (alpha > 12 && alpha < 240) {
+                        if (alpha > 10 && alpha < 245) {
                             
-                            // Pointer-safe contrast lookup
-                            int lumaCenter = (sRow[p]*114 + sRow[p+1]*587 + sRow[p+2]*299)/1000;
-                            int lumaRight = (sRow[p+3]*114 + sRow[p+4]*587 + sRow[p+5]*299)/1000;
+                            // FIX: The 24MP Blur Trap (Expanding the Math Radius)
+                            // A 1-pixel horizontal jump cannot detect contrast on a 24-megapixel D750 image.
+                            // We expand the check to a 6-pixel physical footprint to reliably detect the hair strand edge.
+                            int lumaLeft = (sRow[p - 9]*114 + sRow[p - 8]*587 + sRow[p - 7]*299)/1000;
+                            int lumaRight = (sRow[p + 9]*114 + sRow[p + 10]*587 + sRow[p + 11]*299)/1000;
                             
-                            // Snap to physical 12MP high-contrast boundaries
-                            if (Math.Abs(lumaCenter - lumaRight) > 30) {
-                                // FIXED: Use AI Alpha probability, NOT Luma, to determine polarity for Blonde/White hair support
-                                byte newAlpha = (byte)(alpha > 127 ? Math.Min(255, alpha + 40) : Math.Max(0, alpha - 40));
+                            if (Math.Abs(lumaLeft - lumaRight) > 20) {
+                                // Hard contrast boundary found. Snap it strictly to the AI's geometric confidence.
+                                byte newAlpha = (byte)(alpha > 127 ? 255 : 0);
                                 oRow[p] = newAlpha; oRow[p+1] = newAlpha; oRow[p+2] = newAlpha;
+                            } else {
+                                // No hard physical edge (wispy/frizzy hair in the blur zone).
+                                // Apply an S-Curve filter directly to the Alpha channel to sharpen the 512px upscaling gradient.
+                                byte sharpAlpha = (byte)Math.Clamp((alpha - 128) * 1.5f + 128, 0, 255);
+                                oRow[p] = sharpAlpha; oRow[p+1] = sharpAlpha; oRow[p+2] = sharpAlpha;
                             }
                         }
                     }
@@ -531,7 +535,7 @@ namespace USVisaPhotoAutomator.Services
         private static Bitmap GenerateSheet(Bitmap base2x2, PrintLayout layout, int dpi, BackgroundColorOption bg)
         {
             int t = base2x2.Width;
-            int gutter = 30; // 0.05 inch bleed safe gutter
+            int gutter = 30; 
             
             int w = 4*dpi, h = 6*dpi, cols = 2, rows = 3;
             int sX = (w - (cols*t + (cols-1)*gutter))/2;
