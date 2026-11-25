@@ -149,7 +149,9 @@ namespace USVisaPhotoAutomator.Services
                 _autoTiltDeg = 0;
             }
 
-            _masterAlpha = GetStudioMatte(_masterOriginal);
+            // Execute the new Head-Cropped Coarse-to-Fine Pipeline
+            _masterAlpha = GetHighResStudioMatte(_masterOriginal, _masterEyeX, _masterEyeY, _masterChinY);
+            
             _masterHairTopY = _faceFound ? DetectHairTop(_masterAlpha, _masterEyeX, _masterEyeY, _masterChinY) : (_masterOriginal.Height * 0.2f);
             
             _autoGamma = CalculateAutoLightingGamma(_masterOriginal, (int)_masterEyeX, (int)_masterEyeY, (int)_masterChinY);
@@ -319,7 +321,7 @@ namespace USVisaPhotoAutomator.Services
             unsafe {
                 byte* oPtr = (byte*)od.Scan0; byte* aPtr = (byte*)ad.Scan0; byte* rPtr = (byte*)rd.Scan0;
                 
-                // PASS 1: Apply Gamma, Strand Sharpening, and Alpha
+                // PASS 1: Apply Gamma, Trimap Masking, and Slider
                 for (int y = 0; y < h; y++) {
                     for (int x = 0; x < w; x++) {
                         int idx24 = (y * od.Stride) + (x * 3);
@@ -333,14 +335,12 @@ namespace USVisaPhotoAutomator.Services
                         if (edgeMode == EdgeFeatherMode.Sharp) {
                             rPtr[idx32+3] = matteVal > 127 ? (byte)255 : (byte)0;
                         } else {
-                            // FIX: The Global Math Trap (Trimap Architecture)
-                            // We MUST mathematically lock the solid face and dead background so the slider cannot feather them.
                             if (matteVal > 240) {
-                                rPtr[idx32+3] = 255;
+                                rPtr[idx32+3] = 255; // Lock Solid Core
                             } else if (matteVal < 10) {
-                                rPtr[idx32+3] = 0;
+                                rPtr[idx32+3] = 0;   // Lock Dead Background
                             } else {
-                                // Apply the slider ONLY to the wispy transition zone
+                                // Apply the slider ONLY to the high-res transition zone
                                 int shiftedA = matteVal - alphaShift;
                                 rPtr[idx32+3] = (byte)Math.Clamp(shiftedA, 0, 255); 
                             }
@@ -412,17 +412,98 @@ namespace USVisaPhotoAutomator.Services
             return Math.Clamp((float)(Math.Log(0.56) / Math.Log(Math.Max(0.1, avg))), 0.75f, 1.25f);
         }
 
-        private Bitmap GetStudioMatte(Bitmap source)
+        // ==============================================================================
+        // NEW ARCHITECTURE: Head-Cropped Coarse-to-Fine Patch Inference
+        // ==============================================================================
+        private Bitmap GetHighResStudioMatte(Bitmap source, float eyeX, float eyeY, float chinY)
+        {
+            // PASS 1: Base Matte (Full Image for Shoulders/Body)
+            Bitmap baseMatte = RunModnetInference(source, new Rectangle(0, 0, source.Width, source.Height));
+            if (!_faceFound) return baseMatte;
+
+            // Calculate tight bounding box for the Head to magnify hair resolution 400%
+            float faceDist = chinY - eyeY;
+            int cropSize = (int)(faceDist * 3.5f); // 3.5x multiplier to catch all outer hair
+            
+            int cropX = Math.Clamp((int)(eyeX - cropSize / 2f), 0, source.Width - 1);
+            int cropY = Math.Clamp((int)(eyeY - cropSize * 0.6f), 0, source.Height - 1);
+            int cropW = Math.Min(cropSize, source.Width - cropX);
+            int cropH = Math.Min(cropSize, source.Height - cropY);
+            
+            if (cropW < 50 || cropH < 50) return baseMatte; // Safety fallback
+
+            Rectangle headRect = new Rectangle(cropX, cropY, cropW, cropH);
+            
+            // PASS 2: High-Res Head Matte
+            Bitmap headMatte = RunModnetInference(source, headRect);
+
+            // COMPOSITING: Stitch the High-Res hair mask seamlessly onto the base body mask
+            Bitmap finalMatte = new Bitmap(baseMatte);
+            var baseData = finalMatte.LockBits(new Rectangle(0, 0, finalMatte.Width, finalMatte.Height), ImageLockMode.ReadWrite, PixelFormat.Format24bppRgb);
+            var headData = headMatte.LockBits(new Rectangle(0, 0, headMatte.Width, headMatte.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+
+            // Create a gradient blend zone at the bottom of the bounding box to avoid a neck seam
+            int blendZoneY = (int)(cropH * 0.75f); 
+
+            unsafe {
+                byte* bPtr = (byte*)baseData.Scan0;
+                byte* hPtr = (byte*)headData.Scan0;
+                
+                for (int y = 0; y < cropH; y++) {
+                    int targetY = cropY + y;
+                    if (targetY >= finalMatte.Height) break;
+                    
+                    byte* bRow = bPtr + (targetY * baseData.Stride);
+                    byte* hRow = hPtr + (y * headData.Stride);
+                    
+                    // 1.0 = Pure Head Matte, 0.0 = Pure Base Matte
+                    float weight = 1.0f;
+                    if (y > blendZoneY) {
+                        weight = 1.0f - ((float)(y - blendZoneY) / (cropH - blendZoneY));
+                    }
+                    
+                    for (int x = 0; x < cropW; x++) {
+                        int targetX = cropX + x;
+                        if (targetX >= finalMatte.Width) break;
+                        
+                        int bIdx = targetX * 3;
+                        int hIdx = x * 3;
+                        
+                        byte baseVal = bRow[bIdx];
+                        byte headVal = hRow[hIdx];
+                        
+                        // For hair (weight=1), we strictly trust the high-res inference. 
+                        // At the neck (weight<1), we transition back to the base body mask.
+                        byte blended = (byte)((headVal * weight) + (baseVal * (1.0f - weight)));
+                        
+                        bRow[bIdx] = blended;
+                        bRow[bIdx+1] = blended;
+                        bRow[bIdx+2] = blended;
+                    }
+                }
+            }
+            finalMatte.UnlockBits(baseData);
+            headMatte.UnlockBits(headData);
+            headMatte.Dispose();
+            
+            // Apply the final Guided Filter polish to the stitched ultra-high-res matte
+            Bitmap polishedMatte = ApplyGuidedFilter(source, finalMatte);
+            finalMatte.Dispose();
+            
+            return polishedMatte;
+        }
+
+        private Bitmap RunModnetInference(Bitmap source, Rectangle cropRect)
         {
             int size = 512;
             using var resized = new Bitmap(size, size, PixelFormat.Format24bppRgb);
             using (var g = Graphics.FromImage(resized)) { 
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic; 
-                g.DrawImage(source, 0, 0, size, size); 
+                g.DrawImage(source, new Rectangle(0, 0, size, size), cropRect, GraphicsUnit.Pixel); 
             }
             
             var tensor = new DenseTensor<float>(new[] { 1, 3, size, size });
-            var bd = resized.LockBits(new System.Drawing.Rectangle(0, 0, size, size), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            var bd = resized.LockBits(new Rectangle(0, 0, size, size), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
             
             unsafe
             {
@@ -443,7 +524,7 @@ namespace USVisaPhotoAutomator.Services
             var ot = res.First().AsTensor<float>();
 
             using var sm = new Bitmap(size, size, PixelFormat.Format24bppRgb);
-            var sd = sm.LockBits(new System.Drawing.Rectangle(0,0,size,size), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+            var sd = sm.LockBits(new Rectangle(0,0,size,size), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
             
             unsafe {
                 byte* outRow = (byte*)sd.Scan0;
@@ -458,23 +539,32 @@ namespace USVisaPhotoAutomator.Services
             }
             sm.UnlockBits(sd);
             
-            var output = new Bitmap(source.Width, source.Height, PixelFormat.Format24bppRgb);
-            
+            var output = new Bitmap(cropRect.Width, cropRect.Height, PixelFormat.Format24bppRgb);
             using (var gm = Graphics.FromImage(output)) { 
                 gm.InterpolationMode = InterpolationMode.HighQualityBicubic; 
                 gm.SmoothingMode = SmoothingMode.HighQuality;
-                gm.DrawImage(sm, 0, 0, source.Width, source.Height); 
+                gm.DrawImage(sm, 0, 0, cropRect.Width, cropRect.Height); 
+            }
+            return output;
+        }
+
+        private Bitmap ApplyGuidedFilter(Bitmap source, Bitmap stitchedMatte)
+        {
+            var output = new Bitmap(source.Width, source.Height, PixelFormat.Format24bppRgb);
+            using (var gm = Graphics.FromImage(output)) { 
+                gm.InterpolationMode = InterpolationMode.HighQualityBicubic; 
+                gm.SmoothingMode = SmoothingMode.HighQuality;
+                gm.DrawImage(stitchedMatte, 0, 0, source.Width, source.Height); 
             }
             
-            var srcData = source.LockBits(new System.Drawing.Rectangle(0,0,source.Width,source.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-            var outData = output.LockBits(new System.Drawing.Rectangle(0,0,output.Width,output.Height), ImageLockMode.ReadWrite, PixelFormat.Format24bppRgb);
+            var srcData = source.LockBits(new Rectangle(0,0,source.Width,source.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            var outData = output.LockBits(new Rectangle(0,0,output.Width,output.Height), ImageLockMode.ReadWrite, PixelFormat.Format24bppRgb);
             
             unsafe {
                 byte* sBase = (byte*)srcData.Scan0;
                 byte* oBase = (byte*)outData.Scan0;
                 int stride = srcData.Stride;
                 
-                // Bounds must leave a safety margin of at least 3 pixels to check local variance
                 for (int y = 1; y < source.Height - 1; y++) {
                     byte* sRow = sBase + (y * stride);
                     byte* oRow = oBase + (y * stride);
@@ -484,20 +574,13 @@ namespace USVisaPhotoAutomator.Services
                         byte alpha = oRow[p];
                         
                         if (alpha > 10 && alpha < 245) {
-                            
-                            // FIX: The 24MP Blur Trap (Expanding the Math Radius)
-                            // A 1-pixel horizontal jump cannot detect contrast on a 24-megapixel D750 image.
-                            // We expand the check to a 6-pixel physical footprint to reliably detect the hair strand edge.
                             int lumaLeft = (sRow[p - 9]*114 + sRow[p - 8]*587 + sRow[p - 7]*299)/1000;
                             int lumaRight = (sRow[p + 9]*114 + sRow[p + 10]*587 + sRow[p + 11]*299)/1000;
                             
                             if (Math.Abs(lumaLeft - lumaRight) > 20) {
-                                // Hard contrast boundary found. Snap it strictly to the AI's geometric confidence.
                                 byte newAlpha = (byte)(alpha > 127 ? 255 : 0);
                                 oRow[p] = newAlpha; oRow[p+1] = newAlpha; oRow[p+2] = newAlpha;
                             } else {
-                                // No hard physical edge (wispy/frizzy hair in the blur zone).
-                                // Apply an S-Curve filter directly to the Alpha channel to sharpen the 512px upscaling gradient.
                                 byte sharpAlpha = (byte)Math.Clamp((alpha - 128) * 1.5f + 128, 0, 255);
                                 oRow[p] = sharpAlpha; oRow[p+1] = sharpAlpha; oRow[p+2] = sharpAlpha;
                             }
