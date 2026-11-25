@@ -78,13 +78,22 @@
                     <TextBlock Text="AI ENHANCEMENT" FontSize="10" FontWeight="Bold" Foreground="#66666B" Margin="0,0,0,10"/>
                     <CheckBox x:Name="ChkAutoLighting" Content="Auto-Fix Lighting &amp; Color" IsChecked="True" Foreground="#EEEEEE" FontSize="13" Margin="0,0,0,12" Click="Setting_Changed"/>
                     
+                    <!-- PRO MATTING SLIDER WITH READOUT AND RESET -->
                     <Grid Margin="0,0,0,25">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="32"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <CheckBox x:Name="ChkSoftEdge" Content="Guided Matting" IsChecked="True" Foreground="#EEEEEE" FontSize="13" VerticalAlignment="Center" Click="Setting_Changed"/>
-                        <Slider x:Name="SldFeather" Grid.Column="1" Minimum="0" Maximum="100" Value="50" Margin="15,0,0,0" VerticalAlignment="Center" ToolTip="Adjust Edge Feathering" ValueChanged="Slider_ValueChanged" IsEnabled="{Binding IsChecked, ElementName=ChkSoftEdge}"/>
+                        <CheckBox x:Name="ChkSoftEdge" Content="Guided Matting" IsChecked="True" Foreground="#EEEEEE" FontSize="13" VerticalAlignment="Center" Click="Setting_Changed" Grid.Column="0"/>
+                        
+                        <!-- Slider from -50 (Choke) to +50 (Spread) with 0 as baseline -->
+                        <Slider x:Name="SldFeather" Grid.Column="1" Minimum="-50" Maximum="50" Value="0" Margin="10,0,5,0" VerticalAlignment="Center" ToolTip="Adjust Edge Feathering" ValueChanged="Slider_ValueChanged" IsEnabled="{Binding IsChecked, ElementName=ChkSoftEdge}"/>
+                        
+                        <TextBlock Grid.Column="2" Text="{Binding Value, ElementName=SldFeather, StringFormat=\{0:0\}}" Foreground="#9A9AA0" FontSize="11" FontFamily="Consolas" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,8,0"/>
+                        
+                        <Button Grid.Column="3" Content="↺" Width="22" Height="22" Background="#222226" Foreground="#EEEEEE" BorderBrush="#333338" FontSize="12" Cursor="Hand" Click="BtnResetFeather_Click" ToolTip="Reset to 0" IsEnabled="{Binding IsChecked, ElementName=ChkSoftEdge}"/>
                     </Grid>
 
                     <Button x:Name="BtnSnapAuto" Content="⟲ Snap to AI Crop" Height="32" Background="#222226" Foreground="#EEEEEE" BorderBrush="#333338" FontSize="12" Cursor="Hand" Click="BtnSnapAuto_Click" Margin="0,0,0,20"/>
