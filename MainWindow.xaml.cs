@@ -67,7 +67,7 @@ namespace USVisaPhotoAutomator
             ResetManualOffsets();
 
             BtnGenerate.IsEnabled = false;
-            UpdateStatus("AI Processing: High-Res Guided Matting...", "#FFD700");
+            UpdateStatus("AI Processing: Head-Cropped High-Res Matting...", "#FFD700");
             ProcessingProgress.Visibility = Visibility.Visible;
             PlaceholderUI.Visibility = Visibility.Collapsed;
             PreviewImage.Visibility = Visibility.Collapsed;
