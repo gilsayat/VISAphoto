@@ -252,7 +252,7 @@ namespace USVisaPhotoAutomator
             BtnGenerate.IsEnabled = false;
             try
             {
-                UpdateStatus("Heavy Pipeline Active: Unmixing Sub-Pixel Hair Structure...", "#FF3366");
+                UpdateStatus("V3 Engine Active: Directional Ray-Casting & Regularization...", "#FF3366");
                 ProcessingProgress.Visibility = Visibility.Visible;
 
                 var req = GetCurrentRequest();
