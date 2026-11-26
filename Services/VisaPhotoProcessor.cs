@@ -61,7 +61,7 @@ namespace USVisaPhotoAutomator.Services
         private Bitmap? _cachedSubjectLayer;
         
         // Landmark caching for the Kevlar Jawline Shield
-        private Point[] _jawlinePoints = new Point[17];
+        private System.Drawing.Point[] _jawlinePoints = new System.Drawing.Point[17];
         private bool _hasJawline = false;
         
         private EdgeFeatherMode? _cachedEdgeMode;
@@ -131,7 +131,7 @@ namespace USVisaPhotoAutomator.Services
 
                     // Map Jawline (Landmarks 0 to 16) for the Kevlar Shield
                     for (uint i = 0; i <= 16; i++) {
-                        _jawlinePoints[i] = new Point((int)(shape.GetPart(i).X * ratio), (int)(shape.GetPart(i).Y * ratio));
+                        _jawlinePoints[i] = new System.Drawing.Point((int)(shape.GetPart(i).X * ratio), (int)(shape.GetPart(i).Y * ratio));
                     }
                     _hasJawline = true;
 
@@ -334,11 +334,11 @@ namespace USVisaPhotoAutomator.Services
                 if (_hasJawline)
                 {
                     // Mathematically guarantee 100% opacity for the face and jawline to completely prevent slider artifacting
-                    Point[] shield = new Point[19];
+                    System.Drawing.Point[] shield = new System.Drawing.Point[19];
                     for (int i=0; i<=16; i++) shield[i] = _jawlinePoints[i];
                     // Close the polygon high above the eyes
-                    shield[17] = new Point((int)_masterEyeX + 150, (int)_masterEyeY - 50);
-                    shield[18] = new Point((int)_masterEyeX - 150, (int)_masterEyeY - 50);
+                    shield[17] = new System.Drawing.Point((int)_masterEyeX + 150, (int)_masterEyeY - 50);
+                    shield[18] = new System.Drawing.Point((int)_masterEyeX - 150, (int)_masterEyeY - 50);
                     
                     g.SmoothingMode = SmoothingMode.AntiAlias;
                     g.FillPolygon(System.Drawing.Brushes.White, shield);
@@ -403,6 +403,9 @@ namespace USVisaPhotoAutomator.Services
             }
             finalMatte.UnlockBits(baseData);
             headMatte.UnlockBits(headData);
+            
+            // Dispose the raw materials after compositing to prevent 12MP memory leaks
+            baseMatte.Dispose(); 
             headMatte.Dispose();
             
             return finalMatte;
