@@ -90,7 +90,7 @@ namespace USVisaPhotoAutomator.Services
                 if (!File.Exists(_onnxModelPath) || !File.Exists(_dlibModelPath)) return;
                 
                 var options = new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
-                options.AppendExecutionProvider_CPU();
+                options.AppendExecutionProvider_CPU(); // Strictly CPU bound for NO-INSTALL enterprise compliance
                 
                 _session = new InferenceSession(_onnxModelPath, options);
                 _detector = Dlib.GetFrontalFaceDetector();
@@ -235,11 +235,9 @@ namespace USVisaPhotoAutomator.Services
         {
             if (_masterOriginal == null || _uiPreviewAlpha == null) throw new Exception("Engine not initialized.");
 
-            // Use the fast UI proxy layer when dragging the mouse
             if (_cachedSubjectLayer == null || _cachedEdgeMode != req.EdgeMode || _cachedLightingMode != req.AutoFixLighting || _cachedFeatherIntensity != req.FeatherIntensity) 
             {
                 _cachedSubjectLayer?.Dispose();
-                // We use standard fast masking for UI preview
                 _cachedSubjectLayer = ProcessFastSubjectLayer(_masterOriginal, _uiPreviewAlpha, req.AutoFixLighting ? _autoGamma : 1.0f, req.EdgeMode, req.FeatherIntensity, _masterEyeY);
                 _cachedEdgeMode = req.EdgeMode;
                 _cachedLightingMode = req.AutoFixLighting;
@@ -247,8 +245,6 @@ namespace USVisaPhotoAutomator.Services
             }
 
             int targetSize = 600; 
-            byte bgTarget = req.BgColor == BackgroundColorOption.OffWhite ? (byte)242 : (byte)255;
-
             using Bitmap canvas = new Bitmap(targetSize, targetSize, PixelFormat.Format32bppArgb);
             using Graphics g = Graphics.FromImage(canvas);
             g.Clear(System.Drawing.Color.Transparent);
@@ -272,20 +268,16 @@ namespace USVisaPhotoAutomator.Services
         }
 
         // =================================================================================
-        // HEAVY RENDER PIPELINE (The 5-Second Enterprise Architecture)
+        // HEAVY RENDER PIPELINE (The V3 Enterprise Architecture)
         // =================================================================================
         public void GenerateHighResPrint(ProcessingRequest req)
         {
             if (_masterOriginal == null) return;
             
-            // 1. Trigger the Heavy 12MP Studio Matting Algorithm
             Bitmap heavyMatte = GetHeavyStudioMatte(_masterOriginal, _masterEyeX, _masterEyeY, _masterChinY);
-            
-            // 2. Apply the advanced Floating-Point Color Unmixing
-            Bitmap heavySubject = ProcessHeavySubjectLayer(_masterOriginal, heavyMatte, req.AutoFixLighting ? _autoGamma : 1.0f, req.EdgeMode, req.FeatherIntensity, _masterEyeY);
+            Bitmap heavySubject = ProcessHeavySubjectLayer(_masterOriginal, heavyMatte, req.AutoFixLighting ? _autoGamma : 1.0f, req.EdgeMode, req.FeatherIntensity, _masterEyeY, _masterChinY);
             heavyMatte.Dispose();
 
-            // 3. Render High-Resolution Print Canvas
             int targetSize = 1200; 
             byte bgTarget = req.BgColor == BackgroundColorOption.OffWhite ? (byte)242 : (byte)255;
 
@@ -314,7 +306,6 @@ namespace USVisaPhotoAutomator.Services
             var codec = ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
             canvas.Save(ms, codec, ep);
 
-            // 4. Save Final Sheet
             using Bitmap base2x2 = new Bitmap(ms);
             base2x2.SetResolution(600, 600);
 
@@ -324,19 +315,15 @@ namespace USVisaPhotoAutomator.Services
 
         private Bitmap GetHeavyStudioMatte(Bitmap source, float eyeX, float eyeY, float chinY)
         {
-            // ENTERPRISE STEP 1: Full-Body Base Layer
             Bitmap baseMatte = RunModnetInference(source, new System.Drawing.Rectangle(0, 0, source.Width, source.Height), 512);
             if (!_faceFound) return baseMatte;
 
-            // ENTERPRISE STEP 2: The Kevlar Jawline Shield (Dlib Protection)
             using (var g = Graphics.FromImage(baseMatte))
             {
                 if (_hasJawline)
                 {
-                    // Mathematically guarantee 100% opacity for the face and jawline to completely prevent slider artifacting
                     System.Drawing.Point[] shield = new System.Drawing.Point[19];
                     for (int i=0; i<=16; i++) shield[i] = _jawlinePoints[i];
-                    // Close the polygon high above the eyes
                     shield[17] = new System.Drawing.Point((int)_masterEyeX + 150, (int)_masterEyeY - 50);
                     shield[18] = new System.Drawing.Point((int)_masterEyeX - 150, (int)_masterEyeY - 50);
                     
@@ -345,8 +332,6 @@ namespace USVisaPhotoAutomator.Services
                 }
             }
 
-            // ENTERPRISE STEP 3: High-Res Dynamic Head Patch 
-            // Scales the AI tensor to a massive 1024px for microscope-level hair detail
             float faceDist = chinY - eyeY;
             int cropSize = (int)(faceDist * 3.5f); 
             
@@ -358,9 +343,8 @@ namespace USVisaPhotoAutomator.Services
             if (cropW < 50 || cropH < 50) return baseMatte; 
 
             System.Drawing.Rectangle headRect = new System.Drawing.Rectangle(cropX, cropY, cropW, cropH);
-            Bitmap headMatte = RunModnetInference(source, headRect, 1024); // 1024px High-Res AI Pass
+            Bitmap headMatte = RunModnetInference(source, headRect, 1024); 
 
-            // ENTERPRISE STEP 4: Linear Compositing
             Bitmap finalMatte = new Bitmap(baseMatte);
             var baseData = finalMatte.LockBits(new System.Drawing.Rectangle(0, 0, finalMatte.Width, finalMatte.Height), ImageLockMode.ReadWrite, PixelFormat.Format24bppRgb);
             var headData = headMatte.LockBits(new System.Drawing.Rectangle(0, 0, headMatte.Width, headMatte.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
@@ -391,7 +375,6 @@ namespace USVisaPhotoAutomator.Services
                         int hIdx = x * 3;
                         
                         byte baseVal = bRow[bIdx];
-                        // Never reduce opacity if the Dlib shield already declared it solid
                         if (baseVal == 255 && y > (cropH * 0.4f)) continue; 
                         
                         byte headVal = hRow[hIdx];
@@ -404,14 +387,14 @@ namespace USVisaPhotoAutomator.Services
             finalMatte.UnlockBits(baseData);
             headMatte.UnlockBits(headData);
             
-            // Dispose the raw materials after compositing to prevent 12MP memory leaks
             baseMatte.Dispose(); 
             headMatte.Dispose();
             
             return finalMatte;
         }
 
-        private Bitmap ProcessHeavySubjectLayer(Bitmap orig, Bitmap alpha, float gamma, EdgeFeatherMode edgeMode, double featherIntensity, float masterEyeY)
+        // V3 UNMIXING ENGINE: Sobel-Directed Ray Casting & Epsilon Regularization
+        private Bitmap ProcessHeavySubjectLayer(Bitmap orig, Bitmap alpha, float gamma, EdgeFeatherMode edgeMode, double featherIntensity, float masterEyeY, float masterChinY)
         {
             int w = orig.Width, h = orig.Height;
             Bitmap argb = new Bitmap(w, h, PixelFormat.Format32bppArgb);
@@ -458,48 +441,79 @@ namespace USVisaPhotoAutomator.Services
                     }
                 }
                 
-                // ENTERPRISE STEP 5: Floating-Point Unmixing (The 5-Second Grind)
+                // V3: Directional Ray-Casting & Epsilon Regularization
                 if (edgeMode == EdgeFeatherMode.Soft) {
-                    // Massive Omnidirectional Spatial Kernel (15x15 radius) for perfect unmixing
-                    int radius = 15;
+                    // Dynamic Trimap search radius based on head size
+                    float faceDist = masterChinY - masterEyeY;
+                    int radius = Math.Clamp((int)(faceDist * 0.1f), 10, 30);
+                    int aStride = orig.Width * 3;
                     
-                    for (int y = radius; y < eyeYLim; y++) {
-                        for (int x = radius; x < w - radius; x++) {
+                    for (int y = radius + 2; y < eyeYLim; y++) {
+                        for (int x = radius + 2; x < w - radius - 2; x++) {
                             int idx = (y * stride) + (x * 4);
                             byte a = rPtr[idx+3];
                             
-                            // Only unmix the semi-transparent pixels (The gray halo zone)
-                            if (a > 3 && a < 245) { 
+                            // Process Trimap Unknown Zone
+                            if (a > 3 && a < 250) { 
                                 float currentAlpha = a / 255f;
-                                float bestLumaDist = 999999f;
+                                int aIdx = (y * aStride) + (x * 3);
                                 
-                                int estR = rPtr[idx+2], estG = rPtr[idx+1], estB = rPtr[idx];
+                                // Sobel Gradient Calculation (Alpha Channel Edge Direction)
+                                float aLeft = aPtr[aIdx - 3];
+                                float aRight = aPtr[aIdx + 3];
+                                float aTop = aPtr[aIdx - aStride];
+                                float aBottom = aPtr[aIdx + aStride];
                                 
-                                // Search 360 degrees for a solid hair pixel (Foregound Estimation)
-                                for (int dy = -radius; dy <= radius; dy += 3) {
-                                    for (int dx = -radius; dx <= radius; dx += 3) {
-                                        int nIdx = ((y + dy) * stride) + ((x + dx) * 4);
-                                        
-                                        // Is it pure hair?
-                                        if (rPtr[nIdx+3] > 245) {
-                                            // Closed-Form spatial/luma weighting math
-                                            float lDiff = Math.Abs(rPtr[nIdx] - rPtr[idx]);
-                                            float dist = (float)Math.Sqrt(dx*dx + dy*dy) + lDiff * 2.0f;
-                                            
-                                            if (dist < bestLumaDist) {
-                                                bestLumaDist = dist;
-                                                estB = rPtr[nIdx]; estG = rPtr[nIdx+1]; estR = rPtr[nIdx+2];
-                                            }
-                                        }
+                                float dx = aRight - aLeft;
+                                float dy = aBottom - aTop;
+                                
+                                // Normalize Gradient Direction
+                                float mag = (float)Math.Sqrt(dx*dx + dy*dy);
+                                if (mag < 0.001f) { dx = 1; dy = 0; } // Fallback
+                                else { dx /= mag; dy /= mag; }
+                                
+                                int bgR = rPtr[idx+2], bgG = rPtr[idx+1], bgB = rPtr[idx];
+                                int fgR = rPtr[idx+2], fgG = rPtr[idx+1], fgB = rPtr[idx];
+                                
+                                // Ray Cast INWARD (+ gradient) for pure hair color
+                                for (int step = 1; step <= radius; step++) {
+                                    int sx = x + (int)(dx * step);
+                                    int sy = y + (int)(dy * step);
+                                    int sIdx = (sy * stride) + (sx * 4);
+                                    if (rPtr[sIdx+3] > 245) {
+                                        fgR = rPtr[sIdx+2]; fgG = rPtr[sIdx+1]; fgB = rPtr[sIdx];
+                                        break;
                                     }
                                 }
                                 
-                                // Float Unmixing: Foreground = (Pixel - (1-Alpha)*Background) / Alpha
-                                // We simulate the subtraction to kill the grey halo completely without flattening color.
-                                float blend = Math.Clamp((255 - a) / 255f, 0f, 1f);
-                                rPtr[idx] = (byte)(rPtr[idx] * (1-blend) + estB * blend);
-                                rPtr[idx+1] = (byte)(rPtr[idx+1] * (1-blend) + estG * blend);
-                                rPtr[idx+2] = (byte)(rPtr[idx+2] * (1-blend) + estR * blend);
+                                // Ray Cast OUTWARD (- gradient) for pure local background color
+                                for (int step = 1; step <= radius; step++) {
+                                    int sx = x - (int)(dx * step);
+                                    int sy = y - (int)(dy * step);
+                                    int sIdx = (sy * stride) + (sx * 4);
+                                    if (rPtr[sIdx+3] < 10) {
+                                        bgR = rPtr[sIdx+2]; bgG = rPtr[sIdx+1]; bgB = rPtr[sIdx];
+                                        break;
+                                    }
+                                }
+                                
+                                // V3: Epsilon Regularized Matting Equation
+                                float safeAlpha = Math.Max(currentAlpha, 0.05f); // Prevent Noise Explosion
+                                float pB = rPtr[idx], pG = rPtr[idx+1], pR = rPtr[idx+2];
+                                
+                                float unmixedB = (pB - (1f - currentAlpha) * bgB) / safeAlpha;
+                                float unmixedG = (pG - (1f - currentAlpha) * bgG) / safeAlpha;
+                                float unmixedR = (pR - (1f - currentAlpha) * bgR) / safeAlpha;
+                                
+                                // V3: Alpha S-Curve Taper (No Binarization Crunch)
+                                // Retains optical softness on flyaways while keeping core thick
+                                float sAlpha = (float)(1.0 / (1.0 + Math.Exp(-12.0 * (currentAlpha - 0.5))));
+                                byte finalA = (byte)Math.Clamp(sAlpha * 255f, 0, 255);
+                                
+                                rPtr[idx] = (byte)Math.Clamp(unmixedB, 0, 255);
+                                rPtr[idx+1] = (byte)Math.Clamp(unmixedG, 0, 255);
+                                rPtr[idx+2] = (byte)Math.Clamp(unmixedR, 0, 255);
+                                rPtr[idx+3] = finalA;
                             }
                         }
                     }
@@ -509,7 +523,7 @@ namespace USVisaPhotoAutomator.Services
             return argb;
         }
 
-        // Fast UI Processing (Skipping heavy floating point arrays)
+        // Fast UI Processing
         private static Bitmap ProcessFastSubjectLayer(Bitmap orig, Bitmap alpha, float gamma, EdgeFeatherMode edgeMode, double featherIntensity, float masterEyeY)
         {
             int w = orig.Width, h = orig.Height;
