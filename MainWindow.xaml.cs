@@ -67,7 +67,7 @@ namespace USVisaPhotoAutomator
             ResetManualOffsets();
 
             BtnGenerate.IsEnabled = false;
-            UpdateStatus("AI Processing: Head-Cropped High-Res Matting...", "#FFD700");
+            UpdateStatus("UI Pipeline: Building Fast Canvas Preview...", "#FFD700");
             ProcessingProgress.Visibility = Visibility.Visible;
             PlaceholderUI.Visibility = Visibility.Collapsed;
             PreviewImage.Visibility = Visibility.Collapsed;
@@ -252,16 +252,17 @@ namespace USVisaPhotoAutomator
             BtnGenerate.IsEnabled = false;
             try
             {
-                UpdateStatus("Compiling 600 DPI Master Print Sheet...", "#0066FF");
+                UpdateStatus("Heavy Pipeline Active: Unmixing Sub-Pixel Hair Structure...", "#FF3366");
                 ProcessingProgress.Visibility = Visibility.Visible;
 
                 var req = GetCurrentRequest();
                 req.OutputPath = outputPath;
 
+                // Fire the 5-Second Heavy Render Pipeline
                 await Task.Run(() => _processor.GenerateHighResPrint(req));
                 _lastOutputPath = outputPath;
                 
-                UpdateStatus($"Generation Complete! Ready for Lab Printer.", "#00AA00");
+                UpdateStatus($"Generation Complete! Perfect Studio Extraction.", "#00AA00");
                 BtnOpenFolder.Visibility = Visibility.Visible;
             }
             catch (Exception ex) { UpdateStatus($"Error: {ex.Message}", "#FF0000"); }
