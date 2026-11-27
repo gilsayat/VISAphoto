@@ -173,8 +173,8 @@ namespace USVisaPhotoAutomator.Services
             bool tiltPass = Math.Abs(effectiveTiltDeg) <= 2.0f;
 
             return new ComplianceReport {
-                HeadHeight = new ComplianceCheckItem { Label = "Head Height", ValueText = $"{headHeightPct:F1}% ({headHeightIn:F2}\")", Pass = headPass },
-                EyeLevel = new ComplianceCheckItem { Label = "Eye Level", ValueText = $"{eyeFromBottomPct:F1}% ({eyeFromBottomIn:F2}\")", Pass = eyePass },
+                HeadHeight = new ComplianceCheckItem { Label = "Head Height", ValueText = $"{headHeightPct:F1}% ({headHeightIn:F2}")", Pass = headPass },
+                EyeLevel = new ComplianceCheckItem { Label = "Eye Level", ValueText = $"{eyeFromBottomPct:F1}% ({eyeFromBottomIn:F2}")", Pass = eyePass },
                 Centering = new ComplianceCheckItem { Label = "Centering", ValueText = $"{centerOffsetPct:F1}%", Pass = centerPass },
                 HeadTilt = new ComplianceCheckItem { Label = "Head Level", ValueText = $"{effectiveTiltDeg:F1}°", Pass = tiltPass },
                 OverallPass = headPass && eyePass && centerPass && tiltPass
