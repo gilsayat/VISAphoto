@@ -36,6 +36,7 @@ jobs:
 
       - name: Download Offline AI Models
         run: |
+          curl.exe -L -o ./wwwroot/bundle.js https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/dist/browser/bundle.js
           curl.exe -L -o ./wwwroot/isnet_fp16.onnx https://static.imgly.com/@imgly/background-removal/1.7.0/dist/isnet_fp16.onnx
           curl.exe -L -o ./wwwroot/ort-wasm.wasm https://static.imgly.com/@imgly/background-removal/1.7.0/dist/ort-wasm.wasm
           curl.exe -L -o ./wwwroot/ort-wasm-simd.wasm https://static.imgly.com/@imgly/background-removal/1.7.0/dist/ort-wasm-simd.wasm
