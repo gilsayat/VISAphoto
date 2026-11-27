@@ -34,6 +34,10 @@ jobs:
       - name: Create Models placeholder folder in Publish output
         run: New-Item -ItemType Directory -Force -Path ./Publish/Models
 
+      # NEW STEP: Explicitly copy the WebGPU assets to the publish folder
+      - name: Copy wwwroot to Publish output
+        run: Copy-Item -Path ./wwwroot -Destination ./Publish/wwwroot -Recurse -Force
+
       - name: Upload USVisaPhotoAutomator EXE artifact
         uses: actions/upload-artifact@v4
         with:
