@@ -30,6 +30,7 @@ jobs:
           -r win-x64
           --no-restore
           -o ./Publish
+          -v normal
 
       - name: Create Models placeholder folder in Publish output
         run: New-Item -ItemType Directory -Force -Path ./Publish/Models
