@@ -252,13 +252,13 @@ namespace USVisaPhotoAutomator
             BtnGenerate.IsEnabled = false;
             try
             {
-                UpdateStatus("V3 Engine Active: Directional Ray-Casting & Regularization...", "#FF3366");
+                UpdateStatus("V5 Ultimate Engine Active: Mathematical Alpha Extraction...", "#FF3366");
                 ProcessingProgress.Visibility = Visibility.Visible;
 
                 var req = GetCurrentRequest();
                 req.OutputPath = outputPath;
 
-                // Fire the 5-Second Heavy Render Pipeline
+                // Fire the Deep Render Pipeline (Extended Radius)
                 await Task.Run(() => _processor.GenerateHighResPrint(req));
                 _lastOutputPath = outputPath;
                 
