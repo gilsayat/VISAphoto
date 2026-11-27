@@ -38,10 +38,12 @@ namespace USVisaPhotoAutomator
         private async void InitializeWebEngineAsync()
         {
             try {
-                // Initializes the invisible Edge browser
-                await AiBrowser.EnsureCoreWebView2Async(null);
+                // Ensure the environment is specifically created for the local user temp folder to avoid Permissions Exceptions with PublishSingleFile
+                var userDataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "USVisaAutomatorWebView2");
+                var env = await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(null, userDataFolder, null);
                 
-                // Map our local wwwroot folder to a virtual URL so it functions offline
+                await AiBrowser.EnsureCoreWebView2Async(env);
+                
                 AiBrowser.CoreWebView2.SetVirtualHostNameToFolderMapping(
                     "local.appassets", 
                     Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "wwwroot"), 
@@ -73,15 +75,12 @@ namespace USVisaPhotoAutomator
             byte[] imgBytes = await File.ReadAllBytesAsync(imagePath);
             string base64In = "data:image/jpeg;base64," + Convert.ToBase64String(imgBytes);
             
-            // Fire the huge Base64 string directly into the JS runtime
             AiBrowser.CoreWebView2.PostWebMessageAsString(base64In);
             
-            // Wait for JS to compute the ViTMatte model and respond
             string responseJson = await _aiCompletionSource.Task;
             _aiCompletionSource = null;
             
             if (responseJson.Contains("\"success\":true")) {
-                // Parse out the returned Base64 PNG
                 int dataIndex = responseJson.IndexOf("\"data\":\"") + 8;
                 string base64Out = responseJson.Substring(dataIndex).Split('"')[0];
                 string cleanBase64 = base64Out.Replace("data:image/png;base64,", "");
