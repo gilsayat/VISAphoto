@@ -34,7 +34,14 @@ jobs:
       - name: Create Models placeholder folder in Publish output
         run: New-Item -ItemType Directory -Force -Path ./Publish/Models
 
-      # NEW STEP: Explicitly copy the WebGPU assets to the publish folder
+      - name: Download Offline AI Models
+        run: |
+          curl.exe -L -o ./wwwroot/isnet_fp16.onnx https://static.imgly.com/@imgly/background-removal/1.7.0/dist/isnet_fp16.onnx
+          curl.exe -L -o ./wwwroot/ort-wasm.wasm https://static.imgly.com/@imgly/background-removal/1.7.0/dist/ort-wasm.wasm
+          curl.exe -L -o ./wwwroot/ort-wasm-simd.wasm https://static.imgly.com/@imgly/background-removal/1.7.0/dist/ort-wasm-simd.wasm
+          curl.exe -L -o ./wwwroot/ort-wasm-threaded.wasm https://static.imgly.com/@imgly/background-removal/1.7.0/dist/ort-wasm-threaded.wasm
+          curl.exe -L -o ./wwwroot/ort-wasm-simd-threaded.wasm https://static.imgly.com/@imgly/background-removal/1.7.0/dist/ort-wasm-simd-threaded.wasm
+
       - name: Copy wwwroot to Publish output
         run: Copy-Item -Path ./wwwroot -Destination ./Publish/wwwroot -Recurse -Force
 
