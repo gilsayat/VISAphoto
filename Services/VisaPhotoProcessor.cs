@@ -60,7 +60,6 @@ namespace USVisaPhotoAutomator.Services
         private Bitmap? _uiPreviewAlpha;
         private Bitmap? _cachedSubjectLayer;
         
-        // Landmark caching for the Kevlar Jawline Shield
         private System.Drawing.Point[] _jawlinePoints = new System.Drawing.Point[17];
         private bool _hasJawline = false;
         
@@ -90,7 +89,7 @@ namespace USVisaPhotoAutomator.Services
                 if (!File.Exists(_onnxModelPath) || !File.Exists(_dlibModelPath)) return;
                 
                 var options = new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
-                options.AppendExecutionProvider_CPU(); // Strictly CPU bound for NO-INSTALL enterprise compliance
+                options.AppendExecutionProvider_CPU();
                 
                 _session = new InferenceSession(_onnxModelPath, options);
                 _detector = Dlib.GetFrontalFaceDetector();
@@ -129,7 +128,6 @@ namespace USVisaPhotoAutomator.Services
                     var face = faces.OrderByDescending(r => r.Width * r.Height).First();
                     using var shape = _predictor.Detect(dlibImg, face);
 
-                    // Map Jawline (Landmarks 0 to 16) for the Kevlar Shield
                     for (uint i = 0; i <= 16; i++) {
                         _jawlinePoints[i] = new System.Drawing.Point((int)(shape.GetPart(i).X * ratio), (int)(shape.GetPart(i).Y * ratio));
                     }
@@ -160,7 +158,6 @@ namespace USVisaPhotoAutomator.Services
                 _autoTiltDeg = 0;
             }
 
-            // UI PIPELINE: Fast 512px downscaled matte for dragging and zooming
             _uiPreviewAlpha = RunModnetInference(_masterOriginal, new System.Drawing.Rectangle(0, 0, _masterOriginal.Width, _masterOriginal.Height), 512);
             _masterHairTopY = _faceFound ? DetectHairTop(_uiPreviewAlpha, _masterEyeX, _masterEyeY, _masterChinY) : (_masterOriginal.Height * 0.2f);
             
@@ -229,7 +226,7 @@ namespace USVisaPhotoAutomator.Services
         }
 
         // =================================================================================
-        // UI PIPELINE (Fast Render)
+        // UI PIPELINE (Fast Render) - BUGFIXED FOR CORE LOCK
         // =================================================================================
         public byte[] RenderFrame(ProcessingRequest req, bool previewMode)
         {
@@ -238,7 +235,7 @@ namespace USVisaPhotoAutomator.Services
             if (_cachedSubjectLayer == null || _cachedEdgeMode != req.EdgeMode || _cachedLightingMode != req.AutoFixLighting || _cachedFeatherIntensity != req.FeatherIntensity) 
             {
                 _cachedSubjectLayer?.Dispose();
-                _cachedSubjectLayer = ProcessFastSubjectLayer(_masterOriginal, _uiPreviewAlpha, req.AutoFixLighting ? _autoGamma : 1.0f, req.EdgeMode, req.FeatherIntensity, _masterEyeY);
+                _cachedSubjectLayer = ProcessFastSubjectLayer(_masterOriginal, _uiPreviewAlpha, req.AutoFixLighting ? _autoGamma : 1.0f, req.EdgeMode, req.FeatherIntensity);
                 _cachedEdgeMode = req.EdgeMode;
                 _cachedLightingMode = req.AutoFixLighting;
                 _cachedFeatherIntensity = req.FeatherIntensity;
@@ -268,13 +265,14 @@ namespace USVisaPhotoAutomator.Services
         }
 
         // =================================================================================
-        // HEAVY RENDER PIPELINE (The V3 Enterprise Architecture)
+        // HEAVY RENDER PIPELINE (The V5 Ultimate Architecture)
         // =================================================================================
         public void GenerateHighResPrint(ProcessingRequest req)
         {
             if (_masterOriginal == null) return;
             
             Bitmap heavyMatte = GetHeavyStudioMatte(_masterOriginal, _masterEyeX, _masterEyeY, _masterChinY);
+            
             Bitmap heavySubject = ProcessHeavySubjectLayer(_masterOriginal, heavyMatte, req.AutoFixLighting ? _autoGamma : 1.0f, req.EdgeMode, req.FeatherIntensity, _masterEyeY, _masterChinY);
             heavyMatte.Dispose();
 
@@ -393,7 +391,7 @@ namespace USVisaPhotoAutomator.Services
             return finalMatte;
         }
 
-        // V3 UNMIXING ENGINE: Sobel-Directed Ray Casting & Epsilon Regularization
+        // V5 ULTIMATE ENGINE: Separated Alpha Shift & Extended Ray-Casting
         private Bitmap ProcessHeavySubjectLayer(Bitmap orig, Bitmap alpha, float gamma, EdgeFeatherMode edgeMode, double featherIntensity, float masterEyeY, float masterChinY)
         {
             int w = orig.Width, h = orig.Height;
@@ -412,53 +410,40 @@ namespace USVisaPhotoAutomator.Services
             int alphaShift = (int)(-featherIntensity * 2.5);
             int eyeYLim = (int)masterEyeY;
             int stride = orig.Width * 4;
+            int aStride = orig.Width * 3;
 
             unsafe {
                 byte* oPtr = (byte*)od.Scan0; byte* aPtr = (byte*)ad.Scan0; byte* rPtr = (byte*)rd.Scan0;
                 
+                // PASS 1: Initialize raw RGB and PURE Optical Alpha
                 for (int y = 0; y < h; y++) {
                     for (int x = 0; x < w; x++) {
                         int idx24 = (y * od.Stride) + (x * 3);
+                        int aIdx = (y * aStride) + (x * 3);
                         int idx32 = (y * rd.Stride) + (x * 4);
 
                         rPtr[idx32] = lut[oPtr[idx24]];       // B
                         rPtr[idx32+1] = lut[oPtr[idx24+1]];   // G
                         rPtr[idx32+2] = lut[oPtr[idx24+2]];   // R
-                        
-                        byte matteVal = aPtr[idx24];
-                        if (edgeMode == EdgeFeatherMode.Sharp) {
-                            rPtr[idx32+3] = matteVal > 127 ? (byte)255 : (byte)0;
-                        } else {
-                            if (matteVal > 240) {
-                                rPtr[idx32+3] = 255;
-                            } else if (matteVal < 10) {
-                                rPtr[idx32+3] = 0;
-                            } else {
-                                int shiftedA = matteVal - alphaShift;
-                                rPtr[idx32+3] = (byte)Math.Clamp(shiftedA, 0, 255); 
-                            }
-                        }
+                        rPtr[idx32+3] = aPtr[aIdx];           // Start with raw AI alpha
                     }
                 }
                 
-                // V3: Directional Ray-Casting & Epsilon Regularization
+                // PASS 2: V5 Extended Directional Ray-Casting Color Unmixing
                 if (edgeMode == EdgeFeatherMode.Soft) {
-                    // Dynamic Trimap search radius based on head size
                     float faceDist = masterChinY - masterEyeY;
-                    int radius = Math.Clamp((int)(faceDist * 0.1f), 10, 30);
-                    int aStride = orig.Width * 3;
+                    // Extended search radius for absolute perfection (up to 60 pixels)
+                    int radius = Math.Clamp((int)(faceDist * 0.15f), 15, 60); 
                     
                     for (int y = radius + 2; y < eyeYLim; y++) {
                         for (int x = radius + 2; x < w - radius - 2; x++) {
-                            int idx = (y * stride) + (x * 4);
-                            byte a = rPtr[idx+3];
+                            int aIdx = (y * aStride) + (x * 3);
+                            byte rawAlpha = aPtr[aIdx];
                             
-                            // Process Trimap Unknown Zone
-                            if (a > 3 && a < 250) { 
-                                float currentAlpha = a / 255f;
-                                int aIdx = (y * aStride) + (x * 3);
+                            if (rawAlpha > 3 && rawAlpha < 250) { 
+                                float opticalAlpha = rawAlpha / 255f;
+                                int idx = (y * stride) + (x * 4);
                                 
-                                // Sobel Gradient Calculation (Alpha Channel Edge Direction)
                                 float aLeft = aPtr[aIdx - 3];
                                 float aRight = aPtr[aIdx + 3];
                                 float aTop = aPtr[aIdx - aStride];
@@ -467,53 +452,67 @@ namespace USVisaPhotoAutomator.Services
                                 float dx = aRight - aLeft;
                                 float dy = aBottom - aTop;
                                 
-                                // Normalize Gradient Direction
                                 float mag = (float)Math.Sqrt(dx*dx + dy*dy);
-                                if (mag < 0.001f) { dx = 1; dy = 0; } // Fallback
+                                if (mag < 0.001f) { dx = 1; dy = 0; }
                                 else { dx /= mag; dy /= mag; }
                                 
                                 int bgR = rPtr[idx+2], bgG = rPtr[idx+1], bgB = rPtr[idx];
                                 int fgR = rPtr[idx+2], fgG = rPtr[idx+1], fgB = rPtr[idx];
                                 
-                                // Ray Cast INWARD (+ gradient) for pure hair color
+                                // INWARD search for solid hair
                                 for (int step = 1; step <= radius; step++) {
                                     int sx = x + (int)(dx * step);
                                     int sy = y + (int)(dy * step);
-                                    int sIdx = (sy * stride) + (sx * 4);
-                                    if (rPtr[sIdx+3] > 245) {
+                                    int sAIdx = (sy * aStride) + (sx * 3);
+                                    if (aPtr[sAIdx] > 245) {
+                                        int sIdx = (sy * stride) + (sx * 4);
                                         fgR = rPtr[sIdx+2]; fgG = rPtr[sIdx+1]; fgB = rPtr[sIdx];
                                         break;
                                     }
                                 }
                                 
-                                // Ray Cast OUTWARD (- gradient) for pure local background color
+                                // OUTWARD search for absolute background color
                                 for (int step = 1; step <= radius; step++) {
                                     int sx = x - (int)(dx * step);
                                     int sy = y - (int)(dy * step);
-                                    int sIdx = (sy * stride) + (sx * 4);
-                                    if (rPtr[sIdx+3] < 10) {
+                                    int sAIdx = (sy * aStride) + (sx * 3);
+                                    if (aPtr[sAIdx] < 10) {
+                                        int sIdx = (sy * stride) + (sx * 4);
                                         bgR = rPtr[sIdx+2]; bgG = rPtr[sIdx+1]; bgB = rPtr[sIdx];
                                         break;
                                     }
                                 }
                                 
-                                // V3: Epsilon Regularized Matting Equation
-                                float safeAlpha = Math.Max(currentAlpha, 0.05f); // Prevent Noise Explosion
+                                float safeAlpha = Math.Max(opticalAlpha, 0.05f);
                                 float pB = rPtr[idx], pG = rPtr[idx+1], pR = rPtr[idx+2];
                                 
-                                float unmixedB = (pB - (1f - currentAlpha) * bgB) / safeAlpha;
-                                float unmixedG = (pG - (1f - currentAlpha) * bgG) / safeAlpha;
-                                float unmixedR = (pR - (1f - currentAlpha) * bgR) / safeAlpha;
-                                
-                                // V3: Alpha S-Curve Taper (No Binarization Crunch)
-                                // Retains optical softness on flyaways while keeping core thick
-                                float sAlpha = (float)(1.0 / (1.0 + Math.Exp(-12.0 * (currentAlpha - 0.5))));
-                                byte finalA = (byte)Math.Clamp(sAlpha * 255f, 0, 255);
+                                float unmixedB = (pB - (1f - opticalAlpha) * bgB) / safeAlpha;
+                                float unmixedG = (pG - (1f - opticalAlpha) * bgG) / safeAlpha;
+                                float unmixedR = (pR - (1f - opticalAlpha) * bgR) / safeAlpha;
                                 
                                 rPtr[idx] = (byte)Math.Clamp(unmixedB, 0, 255);
                                 rPtr[idx+1] = (byte)Math.Clamp(unmixedG, 0, 255);
                                 rPtr[idx+2] = (byte)Math.Clamp(unmixedR, 0, 255);
-                                rPtr[idx+3] = finalA;
+                            }
+                        }
+                    }
+                }
+                
+                // PASS 3: Apply the Slider (Feather Intensity) with STRICT Core Lock
+                for (int y = 0; y < h; y++) {
+                    for (int x = 0; x < w; x++) {
+                        int idx32 = (y * rd.Stride) + (x * 4);
+                        byte currentA = rPtr[idx32+3];
+                        
+                        if (edgeMode == EdgeFeatherMode.Sharp) {
+                            rPtr[idx32+3] = currentA > 127 ? (byte)255 : (byte)0;
+                        } else {
+                            if (currentA > 240) {
+                                rPtr[idx32+3] = 255; // Core is mathematically locked. Slider cannot fade the face.
+                            } else if (currentA < 10) {
+                                rPtr[idx32+3] = 0;
+                            } else {
+                                rPtr[idx32+3] = (byte)Math.Clamp(currentA - alphaShift, 0, 255);
                             }
                         }
                     }
@@ -523,8 +522,8 @@ namespace USVisaPhotoAutomator.Services
             return argb;
         }
 
-        // Fast UI Processing
-        private static Bitmap ProcessFastSubjectLayer(Bitmap orig, Bitmap alpha, float gamma, EdgeFeatherMode edgeMode, double featherIntensity, float masterEyeY)
+        // Fast UI Processing (Bugfix: Core Lock Included)
+        private static Bitmap ProcessFastSubjectLayer(Bitmap orig, Bitmap alpha, float gamma, EdgeFeatherMode edgeMode, double featherIntensity)
         {
             int w = orig.Width, h = orig.Height;
             Bitmap argb = new Bitmap(w, h, PixelFormat.Format32bppArgb);
@@ -542,10 +541,19 @@ namespace USVisaPhotoAutomator.Services
                     for (int x = 0; x < w; x++) {
                         int idx24 = (y * od.Stride) + (x * 3);
                         int idx32 = (y * rd.Stride) + (x * 4);
-                        rPtr[idx32] = lut[oPtr[idx24]]; rPtr[idx32+1] = lut[oPtr[idx24+1]]; rPtr[idx32+2] = lut[oPtr[idx24+2]];
+                        
+                        rPtr[idx32] = lut[oPtr[idx24]]; 
+                        rPtr[idx32+1] = lut[oPtr[idx24+1]]; 
+                        rPtr[idx32+2] = lut[oPtr[idx24+2]];
+                        
                         byte matteVal = aPtr[idx24];
-                        if (edgeMode == EdgeFeatherMode.Sharp) rPtr[idx32+3] = matteVal > 127 ? (byte)255 : (byte)0;
-                        else rPtr[idx32+3] = (byte)Math.Clamp(matteVal - alphaShift, 0, 255); 
+                        if (edgeMode == EdgeFeatherMode.Sharp) {
+                            rPtr[idx32+3] = matteVal > 127 ? (byte)255 : (byte)0;
+                        } else {
+                            if (matteVal > 240) rPtr[idx32+3] = 255; // Core Lock for Fast UI
+                            else if (matteVal < 10) rPtr[idx32+3] = 0;
+                            else rPtr[idx32+3] = (byte)Math.Clamp(matteVal - alphaShift, 0, 255); 
+                        }
                     }
                 }
             }
