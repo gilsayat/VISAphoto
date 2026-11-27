@@ -37,17 +37,21 @@ namespace USVisaPhotoAutomator
 
         private async void InitializeWebEngineAsync()
         {
-            // Initializes the invisible Edge browser
-            await AiBrowser.EnsureCoreWebView2Async(null);
-            
-            // Map our local wwwroot folder to a virtual URL so it functions offline
-            AiBrowser.CoreWebView2.SetVirtualHostNameToFolderMapping(
-                "local.appassets", 
-                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "wwwroot"), 
-                Microsoft.Web.WebView2.Core.CoreWebView2HostResourceAccessKind.Allow);
-            
-            AiBrowser.WebMessageReceived += AiBrowser_WebMessageReceived;
-            AiBrowser.Source = new Uri("http://local.appassets/index.html");
+            try {
+                // Initializes the invisible Edge browser
+                await AiBrowser.EnsureCoreWebView2Async(null);
+                
+                // Map our local wwwroot folder to a virtual URL so it functions offline
+                AiBrowser.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                    "local.appassets", 
+                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "wwwroot"), 
+                    Microsoft.Web.WebView2.Core.CoreWebView2HostResourceAccessKind.Allow);
+                
+                AiBrowser.WebMessageReceived += AiBrowser_WebMessageReceived;
+                AiBrowser.Source = new Uri("http://local.appassets/index.html");
+            } catch (Exception ex) {
+                UpdateStatus($"WebView2 Failed: {ex.Message}", "#FF0000");
+            }
         }
 
         private void AiBrowser_WebMessageReceived(object? sender, Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs e)
