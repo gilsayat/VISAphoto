@@ -1,1 +1,8 @@
-using System.Windows; namespace USVisaPhotoAutomator { public partial class App : Application { } }
+using System.Windows;
+
+namespace USVisaPhotoAutomator
+{
+    public partial class App : System.Windows.Application
+    {
+    }
+}
