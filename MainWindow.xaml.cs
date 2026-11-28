@@ -4,18 +4,22 @@ using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
 using System.Windows;
-// We need to resolve ambiguities!
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using USVisaPhotoAutomator.Services;
 using System.Linq;
 
-// Explicit aliasing to fix ambiguity
+// EXPLICIT ALIASING TO RESOLVE ALL WPF vs WINDOWS FORMS AMBIGUITIES
 using Point = System.Windows.Point;
 using MouseEventArgs = System.Windows.Input.MouseEventArgs;
 using DragEventArgs = System.Windows.DragEventArgs;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
+using Color = System.Windows.Media.Color;
+using ColorConverter = System.Windows.Media.ColorConverter;
+using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
+using DataFormats = System.Windows.DataFormats;
+using DragDropEffects = System.Windows.DragDropEffects;
 
 namespace USVisaPhotoAutomator
 {
