@@ -4,25 +4,31 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    
+    <!-- FRAMEWORK INCLUDES -->
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms> <!-- CRITICAL: Required for System.Drawing in .NET 8 -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationIcon>app.ico</ApplicationIcon>
     
-    <!-- FORCE SINGLE FILE BUNDLING -->
-    <SelfContained>false</SelfContained>
+    <!-- SINGLE FILE OFFLINE DEPLOYMENT -->
+    <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
+  
   <ItemGroup>
     <Resource Include="app.ico" />
   </ItemGroup>
+  
   <ItemGroup>
     <PackageReference Include="DlibDotNet" Version="19.21.0.20220724" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2420.47" />
   </ItemGroup>
+  
   <ItemGroup>
     <None Update="wwwroot\**\*.*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
