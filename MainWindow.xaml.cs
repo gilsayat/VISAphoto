@@ -256,6 +256,6 @@ namespace USVisaPhotoAutomator
         }
 
         private void UpdateStatus(string message, string hexColor) { Dispatcher.Invoke(() => { LblStatus.Text = message; LblStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hexColor)); }); }
-        private void BtnOpenFolder_Click(object sender, RoutedEventArgs e) { if (!string.IsNullOrEmpty(_lastOutputPath) && File.Exists(_lastOutputPath)) Process.Start("explorer.exe", $"/select,\"{_lastOutputPath}\""); }
+        private void BtnOpenFolder_Click(object sender, RoutedEventArgs e) { if (!string.IsNullOrEmpty(_lastOutputPath) && File.Exists(_lastOutputPath)) Process.Start("explorer.exe", "/select,\"" + _lastOutputPath + "\""); }
     }
 }
