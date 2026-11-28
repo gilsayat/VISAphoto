@@ -4,11 +4,18 @@ using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
 using System.Windows;
+// We need to resolve ambiguities!
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using USVisaPhotoAutomator.Services;
 using System.Linq;
+
+// Explicit aliasing to fix ambiguity
+using Point = System.Windows.Point;
+using MouseEventArgs = System.Windows.Input.MouseEventArgs;
+using DragEventArgs = System.Windows.DragEventArgs;
+using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 
 namespace USVisaPhotoAutomator
 {
@@ -92,8 +99,8 @@ namespace USVisaPhotoAutomator
         // -------------------------------------------------------------------------
         // STANDARD UI EVENT HANDLERS
         // -------------------------------------------------------------------------
-        private void Window_PreviewKeyDown(object sender, KeyEventArgs e) { if (e.Key == Key.LeftShift || e.Key == Key.RightShift) _isShiftDown = true; }
-        private void Window_PreviewKeyUp(object sender, KeyEventArgs e) { if (e.Key == Key.LeftShift || e.Key == Key.RightShift) _isShiftDown = false; }
+        private void Window_PreviewKeyDown(object sender, KeyEventArgs e) { if (e.Key == System.Windows.Input.Key.LeftShift || e.Key == System.Windows.Input.Key.RightShift) _isShiftDown = true; }
+        private void Window_PreviewKeyUp(object sender, KeyEventArgs e) { if (e.Key == System.Windows.Input.Key.LeftShift || e.Key == System.Windows.Input.Key.RightShift) _isShiftDown = false; }
         private void DropZone_DragEnter(object sender, DragEventArgs e) { if (e.Data.GetDataPresent(DataFormats.FileDrop)) { e.Effects = DragDropEffects.Copy; CanvasBorder.BorderBrush = new SolidColorBrush(Colors.DodgerBlue); } }
         private void DropZone_DragLeave(object sender, DragEventArgs e) { CanvasBorder.BorderBrush = new SolidColorBrush(Colors.Transparent); }
         
@@ -147,12 +154,12 @@ namespace USVisaPhotoAutomator
             finally { ProcessingProgress.Visibility = Visibility.Collapsed; }
         }
 
-        private void Canvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        private void Canvas_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
             _isDragging = true; _dragStartPos = e.GetPosition(CanvasBorder); CanvasBorder.CaptureMouse();
         }
 
-        private void Canvas_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        private void Canvas_MouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
             _isDragging = false; CanvasBorder.ReleaseMouseCapture(); TriggerLiveRender(); 
         }
@@ -166,7 +173,7 @@ namespace USVisaPhotoAutomator
             _dragStartPos = currentPos; TriggerLiveRender();
         }
 
-        private void Canvas_MouseWheel(object sender, MouseWheelEventArgs e)
+        private void Canvas_MouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
         {
             if (_isShiftDown) {
                 _tiltAngle = Math.Clamp(_tiltAngle + (e.Delta > 0 ? 0.5 : -0.5), -25, 25);
